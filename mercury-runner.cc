@@ -316,6 +316,9 @@ int main(int argc, char **argv) {
     struct useprobe mainuse;
     argv0 = argv[0];
 
+    /* we want lines, even if we are writing to a pipe */
+    setlinebuf(stdout);
+
     g.count = DEF_COUNT;
     g.mode = MR_CLISRV;
     g.baseport = DEF_BASEPORT;
