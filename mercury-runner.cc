@@ -67,6 +67,7 @@
  *  -m mode      c, s, cs (client, server, or both)
  *  -p baseport  base port number
  *  -q           quiet mode - don't print during RPCs
+ *  -r n         enable tag suffix with this run number
  *  -t secs      timeout (alarm)
  *
  * note that "remotespec" is optional if mode is "s" (server-only)
@@ -216,9 +217,13 @@ struct g {
     int baseport;            /* base port number */
     int count;               /* number of msgs to send/recv in a run */
     int mode;                /* operation mode (MR_CLIENT, etc.) */
+    char modestr[4];         /* mode string */
     int limit;               /* limit # of concurrent RPCs at client */
     int quiet;               /* don't print so much */
+    int rflag;               /* -r spec'd */
+    int rflagval;            /* value for -r */
     int timeout;             /* alarm timeout */
+    char tagsuffix[64];      /* tag suffix: ninst-count-mode-limit-run# */
 } g;
 
 /*
@@ -296,6 +301,7 @@ static void usage(const char *msg) {
     fprintf(stderr, "\t-m mode     mode c, s, or cs (client/server)\n");
     fprintf(stderr, "\t-p port     base port number\n");
     fprintf(stderr, "\t-q          quiet mode\n");
+    fprintf(stderr, "\t-r n        enable tag suffix with this run number\n");
     fprintf(stderr, "\t-t sec      timeout (alarm), in seconds\n");
     fprintf(stderr, "\nuse '-l 1' to serialize RPCs\n");
     exit(1);
@@ -314,6 +320,7 @@ int main(int argc, char **argv) {
     pthread_t *tarr;
     char *c;
     struct useprobe mainuse;
+    char mytag[128];
     argv0 = argv[0];
 
     /* we want lines, even if we are writing to a pipe */
@@ -324,8 +331,10 @@ int main(int argc, char **argv) {
     g.baseport = DEF_BASEPORT;
     g.quiet = 0;
     g.limit = 0;
+    g.rflag = 0;
     g.timeout = DEF_TIMEOUT;
-    while ((ch = getopt(argc, argv, "c:l:m:p:qt:")) != -1) {
+    g.tagsuffix[0] = '\0';
+    while ((ch = getopt(argc, argv, "c:l:m:p:qr:t:")) != -1) {
         switch (ch) {
             case 'c':
                 g.count = atoi(optarg);
@@ -352,6 +361,10 @@ int main(int argc, char **argv) {
             case 'q':
                 g.quiet = 1;
                 break;
+            case 'r':
+                g.rflag++;  /* will gen tag suffix after args parsed */
+                g.rflagval = atoi(optarg);
+                break;
             case 't':
                 g.timeout = atoi(optarg);
                 if (g.timeout < 0) usage("bad timeout");
@@ -373,6 +386,12 @@ int main(int argc, char **argv) {
     g.remotespec = (argc == 3) ? argv[2] : NULL;
     if (!g.limit)
         g.limit = g.count;    /* max value */
+    snprintf(g.modestr, sizeof(g.modestr), "%s%s",
+            (g.mode & MR_CLIENT) ? "c" : "", (g.mode & MR_SERVER) ? "s" : "");
+    if (g.rflag) {
+        snprintf(g.tagsuffix, sizeof(g.tagsuffix), "-%d-%d-%s-%d-%d",
+                 n, g.count, g.modestr, g.limit, g.rflagval);
+    }
 
     printf("\n%s options:\n", argv0);
     printf("\tninstances = %d\n", n);
@@ -380,13 +399,14 @@ int main(int argc, char **argv) {
     printf("\tremotespec = %s\n", (g.remotespec) ? g.remotespec : "<none>");
     printf("\tbaseport   = %d\n", g.baseport);
     printf("\tcount      = %d\n", g.count);
-    printf("\tmode       = %s%s\n", (g.mode & MR_CLIENT) ? "c" : "",
-                                    (g.mode & MR_SERVER) ? "s" : "");
+    printf("\tmode       = %s\n", g.modestr);
     if (g.limit == g.count)
         printf("\tlimit      = <none>\n");
     else
         printf("\tlimit      = %d\n", g.limit);
     printf("\tquiet      = %d\n", g.quiet);
+    if (g.rflag)
+        printf("\tsuffix     = %s\n", g.tagsuffix);
     printf("\ttimeout    = %d\n", g.timeout);
     printf("\n");
 
@@ -414,7 +434,8 @@ int main(int argc, char **argv) {
     }
     useprobe_end(&mainuse);
     printf("main: collection done.\n");
-    useprobe_print(stdout, &mainuse, "ALL", -1);
+    snprintf(mytag, sizeof(mytag), "ALL%s", g.tagsuffix);
+    useprobe_print(stdout, &mainuse, mytag, -1);
     printf("main exiting...\n");
 
     exit(0);
@@ -584,8 +605,8 @@ skipsend:
     if (g.mode & MR_CLIENT) {
         double rtime = (rp.t1.tv_sec + (rp.t1.tv_usec / 1000000.0)) -
                        (rp.t0.tv_sec + (rp.t0.tv_usec / 1000000.0));
-        printf("%d: client: %d rpc%s in %f sec (%f sec per op)\n",
-               n, g.count, (g.count == 1) ? "" : "s",
+        printf("%d: client%s: %d rpc%s in %f sec (%f sec per op)\n",
+               n, g.tagsuffix, g.count, (g.count == 1) ? "" : "s",
                rtime, rtime / (double) g.count);
     }
 
