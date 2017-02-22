@@ -504,9 +504,16 @@ void save_dir_addr(int n) {
     snprintf(file, sizeof(file), "s.%s.%d", g.localtag, n);
     fp = fopen(file, "w");
     if (!fp) complain(1, "fopen failed: %s", strerror(errno));
-    put = fprintf(fp, "%s+%s", name, tmpbuf);
-    if (put + 1 != namelen + 1 + asz)
-        complain(1, "fprintf failed: %d != %d", put + 1, namelen + 1 + asz);
+    if (strcmp(g.localspec, "mpi+dynamic") == 0) {
+        /* XXXCDC: why isn't this uniform? */
+        put = fprintf(fp, "%s", tmpbuf);
+        //if (put + 1 != asz)
+        //    complain(1, "fprintf failed: %d != %d", put + 1, namelen + 1 + asz);
+    } else {
+        put = fprintf(fp, "%s+%s", name, tmpbuf);
+        if (put + 1 != namelen + 1 + asz)
+            complain(1, "fprintf failed: %d != %d", put + 1, namelen + 1 + asz);
+    }
     if (fclose(fp) != 0)
         complain(1, "fclose failed");
 
