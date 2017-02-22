@@ -63,6 +63,7 @@
  *
  * options:
  *  -c count     number of RPCs to perform
+ *  -d dir       shared directory to pass server address through
  *  -l limit     limit # of concurrent client RPC requests ("-l 1" = serial)
  *  -m mode      c, s, cs (client, server, or both)
  *  -p baseport  base port number
@@ -92,14 +93,21 @@
  *    ./mercury-runner -c 50 -q -m cs 1 cci+tcp://10.93.1.233:%d \
  *                           cci+tcp://10.93.1.210:%d
  *
+ * when using "-d":
+ *    localrspec should be tag=<mercury-url>
+ *    and remotespec should just be the remote tag (it will read the
+ *    actual data from the directory).
  */
 
 #include <assert.h>
+#include <errno.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <unistd.h>
 #include <pthread.h>
+#include <sys/stat.h>
 #include <sys/time.h>
 #include <sys/resource.h>
 
@@ -111,7 +119,8 @@
  * in one single source file...
  */
 
-char *argv0;    /* argv[0], program name */
+char *argv0;                     /* argv[0], program name */
+static void clean_dir_addrs();   /* for complain exit */
 
 /*
  * vcomplain/complain about something.  if ret is non-zero we exit(ret) after
@@ -121,8 +130,10 @@ void vcomplain(int ret, const char *format, va_list ap) {
     fprintf(stderr, "%s: ", argv0);
     vfprintf(stderr, format, ap);
     fprintf(stderr, "\n");
-    if (ret)
+    if (ret) {
+        clean_dir_addrs();
         exit(ret);
+    }
 }
 
 void complain(int ret, const char *format, ...) {
@@ -213,9 +224,11 @@ void useprobe_print(FILE *out, struct useprobe *up, const char *tag, int n) {
 struct g {
     int ninst;               /* number of instances */
     char *localspec;         /* local address spec */
+    char *localtag;          /* if using "-d" - the local tag */
     char *remotespec;        /* remote address spec */
     int baseport;            /* base port number */
     int count;               /* number of msgs to send/recv in a run */
+    char *dir;               /* shared directory (mainly for mpi) */
     int mode;                /* operation mode (MR_CLIENT, etc.) */
     char modestr[4];         /* mode string */
     int limit;               /* limit # of concurrent RPCs at client */
@@ -297,6 +310,7 @@ static void usage(const char *msg) {
     fprintf(stderr, "remotespec is optional if mode is set to 's' (server)\n");
     fprintf(stderr, "\noptions:\n");
     fprintf(stderr, "\t-c count    number of RPCs to perform\n");
+    fprintf(stderr, "\t-d dir      shared dir for passing server addresses\n");
     fprintf(stderr, "\t-l limit    limit # of client concurrent RPCs\n");
     fprintf(stderr, "\t-m mode     mode c, s, or cs (client/server)\n");
     fprintf(stderr, "\t-p port     base port number\n");
@@ -317,8 +331,8 @@ static void usage(const char *msg) {
  */
 int main(int argc, char **argv) {
     int ch, n, lcv, rv;
-    pthread_t *tarr;
     char *c;
+    pthread_t *tarr;
     struct useprobe mainuse;
     char mytag[128];
     argv0 = argv[0];
@@ -326,7 +340,9 @@ int main(int argc, char **argv) {
     /* we want lines, even if we are writing to a pipe */
     setlinebuf(stdout);
 
+    g.localtag = NULL;
     g.count = DEF_COUNT;
+    g.dir = NULL;
     g.mode = MR_CLISRV;
     g.baseport = DEF_BASEPORT;
     g.quiet = 0;
@@ -334,11 +350,14 @@ int main(int argc, char **argv) {
     g.rflag = 0;
     g.timeout = DEF_TIMEOUT;
     g.tagsuffix[0] = '\0';
-    while ((ch = getopt(argc, argv, "c:l:m:p:qr:t:")) != -1) {
+    while ((ch = getopt(argc, argv, "c:d:l:m:p:qr:t:")) != -1) {
         switch (ch) {
             case 'c':
                 g.count = atoi(optarg);
                 if (g.count < 1) usage("bad count");
+                break;
+            case 'd':
+                g.dir = optarg;
                 break;
             case 'l':
                 g.limit = atoi(optarg);
@@ -386,6 +405,16 @@ int main(int argc, char **argv) {
     g.remotespec = (argc == 3) ? argv[2] : NULL;
     if (!g.limit)
         g.limit = g.count;    /* max value */
+    if (g.dir) {
+        if (chdir(g.dir) < 0)
+            complain(1, "can't cd to %s: %s", g.dir, strerror(errno));
+        c = strchr(g.localspec, '=');
+        if (!c)
+            complain(1, "missing '=' in localspec: %s", g.localspec);
+        g.localtag = g.localspec;
+        *c = '\0';
+        g.localspec = c + 1;
+    }
     snprintf(g.modestr, sizeof(g.modestr), "%s%s",
             (g.mode & MR_CLIENT) ? "c" : "", (g.mode & MR_SERVER) ? "s" : "");
     if (g.rflag) {
@@ -396,6 +425,8 @@ int main(int argc, char **argv) {
     printf("\n%s options:\n", argv0);
     printf("\tninstances = %d\n", n);
     printf("\tlocalspec  = %s\n", g.localspec);
+    if (g.localtag)
+        printf("\tlocaltag   = %s\n", g.localtag);
     printf("\tremotespec = %s\n", (g.remotespec) ? g.remotespec : "<none>");
     printf("\tbaseport   = %d\n", g.baseport);
     printf("\tcount      = %d\n", g.count);
@@ -438,7 +469,89 @@ int main(int argc, char **argv) {
     useprobe_print(stdout, &mainuse, mytag, -1);
     printf("main exiting...\n");
 
+    clean_dir_addrs();
     exit(0);
+}
+
+/*
+ * save_dir_addr: write my server address to a file (only used if g.dir).
+ * will exit on failure...
+ */
+void save_dir_addr(int n) {
+    const char *name;
+    hg_size_t namelen, asz, put;
+    char *tmpbuf, file[128];
+    hg_addr_t myaddr;
+    FILE *fp;
+
+    /* HG_Addr_to_string() doesn't include the protocol */
+    name = HG_Class_get_name(is[n].hgclass);
+    if (!name) complain(1, "can't get class name");
+    namelen = strlen(name);
+
+    /* get my local address, convert to string in malloc'd buf */
+    if (HG_Addr_self(is[n].hgclass, &myaddr) != HG_SUCCESS)
+        complain(1, "HG_Addr_self failed?!");
+    if (HG_Addr_to_string(is[n].hgclass, NULL, &asz, myaddr) != HG_SUCCESS)
+        complain(1, "addr to string failed to give needed size");
+    if ((tmpbuf = (char *)malloc(asz+4)) == NULL)
+        complain(1, "malloc %d failed", asz+4);
+    if (HG_Addr_to_string(is[n].hgclass, tmpbuf,
+                                          &asz, myaddr) != HG_SUCCESS)
+        complain(1, "addr to string failed");
+
+    /* write the data to the file */
+    snprintf(file, sizeof(file), "s.%s.%d", g.localtag, n);
+    fp = fopen(file, "w");
+    if (!fp) complain(1, "fopen failed: %s", strerror(errno));
+    put = fprintf(fp, "%s+%s", name, tmpbuf);
+    if (put + 1 != namelen + 1 + asz)
+        complain(1, "fprintf failed: %d != %d", put + 1, namelen + 1 + asz);
+    if (fclose(fp) != 0)
+        complain(1, "fclose failed");
+
+    /* done, free and return */
+    free(tmpbuf);
+    if (HG_Addr_free(is[n].hgclass, myaddr) != HG_SUCCESS)
+        complain(0, "warning: HG_Addr_free failed");
+}
+
+/*
+ * load_dir_addr: load remote address from a directory, return malloc'd buf
+ */
+char *load_dir_addr(int n) {
+    char file[128], *retbuf;
+    struct stat st;
+    FILE *fp;
+    snprintf(file, sizeof(file), "s.%s.%d", is[n].remoteid, n);
+    if (stat(file, &st) < 0)
+        complain(1, "can't stat %s: %s", file, strerror(errno));
+    retbuf = (char *)malloc(st.st_size+1);
+    if (retbuf == NULL)
+        complain(1, "load_dir_addr: malloc %d failed", st.st_size+1);
+    retbuf[st.st_size] = '\0';   /* null at end */
+    fp = fopen(file, "r");
+    if (fp == NULL)
+        complain(1, "load_dir_addr: fopen %s: %s", file, strerror(errno));
+    if (fread(retbuf, 1, st.st_size, fp) != st.st_size)
+        complain(1, "load_dir_addr: fread failed");
+    fclose(fp);
+    printf("%d: resolved remote tag %s to %s\n", n, is[n].remoteid, retbuf);
+    return(retbuf);
+}
+
+/*
+ * clean_dir_addrs: remove the addr files (e.g when exiting)
+ */
+static void clean_dir_addrs() {
+    int lcv;
+    char file[128];
+    if (g.dir == NULL)
+        return;
+    for (lcv = 0 ; lcv < g.ninst ; lcv++) {
+        snprintf(file, sizeof(file), "s.%s.%d", is[lcv].remoteid, lcv);
+        unlink(file);   /* ignore errors */
+    }
 }
 
 /*
@@ -449,6 +562,7 @@ void *run_instance(void *arg) {
     struct is *isp = (struct is *)arg;
     int n = isp->n;               /* recover n from isp */
     int lcv, rv;
+    char *remoteurl;
     hg_return_t ret;
     struct lookup_state lst;
     hg_op_id_t lookupop;
@@ -494,7 +608,12 @@ void *run_instance(void *arg) {
     rv = pthread_create(&is[n].nthread, NULL, run_network, (void*)&n);
     if (rv != 0) complain(1, "pthread create srvr failed %d", rv);
 
-    if (g.mode != MR_SERVER) {    /* plain server can start right away */
+    /* servers handle the g.dir option by writing our addr to a file */
+    if (g.dir != NULL && (g.mode & MR_SERVER) != 0) {
+        save_dir_addr(n);
+    }
+
+    if (g.mode != MR_SERVER) {    /* plain server-only can start right away */
         /* poor man's barrier */
         printf("%d: init done.  sleeping 10\n", n);
         sleep(10);
@@ -505,7 +624,8 @@ void *run_instance(void *arg) {
      * once, since it is fixed for this program...
      */
     if (g.mode & MR_CLIENT) {
-        printf("%d: remote address lookup %s\n", n, is[n].remoteid);
+        remoteurl = (g.dir) ? load_dir_addr(n) : is[n].remoteid;
+        printf("%d: remote address lookup %s\n", n, remoteurl);
         if (pthread_mutex_init(&lst.lock, NULL) != 0)
             complain(1, "lst.lock mutex init");
         pthread_mutex_lock(&lst.lock);
@@ -515,7 +635,7 @@ void *run_instance(void *arg) {
             complain(1, "lst.lkupcond cond init");
 
         ret = HG_Addr_lookup(is[n].hgctx, lookup_cb, &lst,
-                             is[n].remoteid, &lookupop);
+                             remoteurl, &lookupop);
         if (ret != HG_SUCCESS) complain(1, "HG addr lookup launch failed");
         while (lst.done == 0) {
             if (pthread_cond_wait(&lst.lkupcond, &lst.lock) != 0)
@@ -525,6 +645,8 @@ void *run_instance(void *arg) {
         pthread_cond_destroy(&lst.lkupcond);
         pthread_mutex_unlock(&lst.lock);
         pthread_mutex_destroy(&lst.lock);
+        if (remoteurl != is[n].remoteid) free(remoteurl);
+        remoteurl = NULL;
         printf("%d: done remote address lookup\n", n);
 
         /* poor man's barrier again... */
