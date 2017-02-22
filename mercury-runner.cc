@@ -428,6 +428,8 @@ int main(int argc, char **argv) {
     if (g.localtag)
         printf("\tlocaltag   = %s\n", g.localtag);
     printf("\tremotespec = %s\n", (g.remotespec) ? g.remotespec : "<none>");
+    if (g.dir)
+        printf("\tdirectory  = %s\n", g.dir);
     printf("\tbaseport   = %d\n", g.baseport);
     printf("\tcount      = %d\n", g.count);
     printf("\tmode       = %s\n", g.modestr);
