@@ -107,6 +107,7 @@
 #include <string.h>
 #include <unistd.h>
 #include <pthread.h>
+#include <signal.h>
 #include <sys/stat.h>
 #include <sys/time.h>
 #include <sys/resource.h>
@@ -288,6 +289,27 @@ MERCURY_GEN_PROC(rpcin_t, ((int32_t)(ret)))
 MERCURY_GEN_PROC(rpcout_t, ((int32_t)(ret)))
 
 /*
+ * alarm signal handler
+ */
+void sigalarm(int foo) {
+    int lcv;
+    fprintf(stderr, "SIGALRM detected\n");
+    for (lcv = 0 ; lcv < g.ninst ; lcv++) {
+        fprintf(stderr, "%d: @alarm: ", lcv);
+        if (is[lcv].hgctx == NULL) {
+            fprintf(stderr, "no context\n");
+            continue;
+        }
+        fprintf(stderr, "got=%d, nsent=%d, sdone=%d, prog=%d, trig=%d\n",
+                is[lcv].got, is[lcv].nsent, is[lcv].sends_done,
+                is[lcv].nprogress, is[lcv].ntrigger);
+    }
+    clean_dir_addrs();
+    fprintf(stderr, "Alarm clock\n");
+    exit(1);
+}
+
+/*
  * forward prototypes here, so we can structure the source code to
  * be more linear to make it easier to read.
  */
@@ -443,6 +465,7 @@ int main(int argc, char **argv) {
     printf("\ttimeout    = %d\n", g.timeout);
     printf("\n");
 
+    signal(SIGALRM, sigalarm);
     alarm(g.timeout);
     printf("main: starting %d instance%s ...\n", n, (n == 1) ? "" : "s");
     tarr = (pthread_t *)malloc(n * sizeof(pthread_t));
