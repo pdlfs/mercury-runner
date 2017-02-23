@@ -256,12 +256,14 @@ struct is {
     char myfun[64];          /* my function name */
     int nprogress;           /* number of times through progress loop */
     int ntrigger;            /* number of times trigger called */
-    int got;                 /* number of RPCs server has got */
+    int recvd;               /* server: request callback received */
+    int responded;           /* server: completed responses */
 
     /* client side sending flow control */
     pthread_mutex_t slock;   /* lock for this block of vars */
     pthread_cond_t scond;    /* client blocks here if waiting for network */
     int scond_mode;          /* mode for scond */
+    int nstarted;            /* number of RPCs started */
     int nsent;               /* number of RPCs successfully sent */
 #define SM_OFF      0        /* don't signal client */
 #define SM_SENTONE  1        /* finished sending an RPC */
@@ -300,9 +302,11 @@ void sigalarm(int foo) {
             fprintf(stderr, "no context\n");
             continue;
         }
-        fprintf(stderr, "got=%d, nsent=%d, sdone=%d, prog=%d, trig=%d\n",
-                is[lcv].got, is[lcv].nsent, is[lcv].sends_done,
-                is[lcv].nprogress, is[lcv].ntrigger);
+        fprintf(stderr,
+                "srvr=%d(%d), clnt=%d(%d), sdone=%d, prog=%d, trig=%d\n",
+                is[lcv].recvd, is[lcv].recvd - is[lcv].responded,
+                is[lcv].nstarted, is[lcv].nstarted - is[lcv].nsent,
+                is[lcv].sends_done, is[lcv].nprogress, is[lcv].ntrigger);
     }
     clean_dir_addrs();
     fprintf(stderr, "Alarm clock\n");
@@ -716,6 +720,7 @@ void *run_instance(void *arg) {
         if (!g.quiet)
             printf("%d: launching %d\n", n, in.ret);
         ret = HG_Forward(rpchand, forw_cb, &is[n], &in);
+        is[n].nstarted++;
         if (ret != HG_SUCCESS) complain(1, "hg forward failed");
         if (!g.quiet)
             printf("%d: launched %d\n", n, in.ret);
@@ -857,7 +862,7 @@ static void *run_network(void *arg) {
 #endif
     unsigned int actual;
     hg_return_t ret;
-    is[n].got = actual = 0;
+    is[n].recvd = is[n].responded = actual = 0;
     is[n].nprogress = is[n].ntrigger = 0;
 
     printf("%d: network thread running\n", n);
@@ -867,7 +872,7 @@ static void *run_network(void *arg) {
 
     /* while (not done sending or not done recving */
     while ( ((g.mode & MR_CLIENT) && !is[n].sends_done  ) ||
-            ((g.mode & MR_SERVER) && is[n].got < g.count) ) {
+            ((g.mode & MR_SERVER) && is[n].responded < g.count) ) {
 
         do {
             ret = HG_Trigger(is[n].hgctx, 0, 1, &actual);
@@ -875,7 +880,7 @@ static void *run_network(void *arg) {
         } while (ret == HG_SUCCESS && actual);
 
         /* recheck, since trigger can change is[n].got */
-        if (!is[n].sends_done || is[n].got < g.count) {
+        if (!is[n].sends_done || is[n].responded < g.count) {
             HG_Progress(is[n].hgctx, 100);
         }
 
@@ -912,6 +917,9 @@ static hg_return_t rpchandler(hg_handle_t handle) {
     isp = (struct is *) HG_Registered_data(hgi->hg_class, hgi->id);
     if (!isp) complain(1, "rpchandler: bad isp");
 
+    /* currently safe: only one network thread and we are in it */
+    isp->recvd++;
+
     ret = HG_Get_input(handle, &in);
     if (ret != HG_SUCCESS) complain(1, "rpchandler: HG_Get_input failed");
     if (!g.quiet)
@@ -939,7 +947,7 @@ static hg_return_t reply_sent_cb(const struct hg_cb_info *cbi) {
      * currently safe: there is only one network thread and we
      * are in it (via trigger fn).
      */
-    isp->got++;
+    isp->responded++;
 
     /* return handle to the pool for reuse */
     HG_Destroy(cbi->info.respond.handle);
