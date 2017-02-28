@@ -1497,9 +1497,9 @@ static void *run_network(void *arg) {
         /* recheck, since trigger can change is[n].got */
         if (!is[n].sends_done || is[n].responded < g.count) {
             HG_Progress(is[n].hgctx, 100);
+            is[n].nprogress++;
         }
 
-        is[n].nprogress++;
     }
 
     /* dump the respstate cache */
