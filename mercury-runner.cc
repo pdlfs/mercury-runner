@@ -1343,6 +1343,7 @@ skipsend:
     }
     is[n].ncfree = 0;     /* just to be clear */
 
+    printf("%d: destroy context and finalize mercury\n", n);
     HG_Context_destroy(is[n].hgctx);
     HG_Finalize(is[n].hgclass);
 
