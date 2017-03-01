@@ -9,7 +9,7 @@
 #
 cmake_minimum_required(VERSION 3.1)
 
-project (mercury-runner CXX)
+project (mercury-runner C CXX)
 
 set (CMAKE_INSTALL_RPATH_USE_LINK_PATH TRUE)
 
