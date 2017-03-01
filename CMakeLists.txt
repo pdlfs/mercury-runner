@@ -23,3 +23,8 @@ find_package (mercury CONFIG REQUIRED)
 add_executable (mercury-runner mercury-runner.cc)
 target_include_directories (mercury-runner PUBLIC ${MERCURY_INCLUDE_DIR})
 target_link_libraries (mercury-runner mercury Threads::Threads)
+
+#
+# "make install" rule
+#
+install (TARGETS mercury-runner RUNTIME DESTINATION bin)
