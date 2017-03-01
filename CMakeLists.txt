@@ -11,6 +11,8 @@ cmake_minimum_required(VERSION 3.1)
 
 project (mercury-runner CXX)
 
+set (CMAKE_INSTALL_RPATH_USE_LINK_PATH TRUE)
+
 set (CMAKE_THREAD_PREFER_PTHREAD TRUE)
 set (THREADS_PREFER_PTHREAD_FLAG TRUE)
 # XXX: cmake 3.1 and newer define a Threads::Threads imported target
