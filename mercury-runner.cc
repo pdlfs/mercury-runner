@@ -1529,7 +1529,7 @@ static void *run_network(void *arg) {
  */
 static hg_return_t rpchandler(hg_handle_t handle) {
     struct is *isp;
-    struct hg_info *hgi;
+    const struct hg_info *hgi;
     struct respstate *rs;
     hg_return_t ret;
     int32_t inseq;
@@ -1569,7 +1569,7 @@ static hg_return_t rpchandler(hg_handle_t handle) {
  * advance_resp_phase: push the rs forward
  */
 static hg_return_t advance_resp_phase(struct respstate *rs) {
-    struct hg_info *hgi;
+    const struct hg_info *hgi;
     hg_size_t tomove;
     hg_return_t rv;
     hg_op_id_t dummy;
