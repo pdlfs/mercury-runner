@@ -111,7 +111,7 @@
  *                           cci+tcp://10.93.1.210:%d
  *
  * when using "-d":
- *    localrspec should be tag=<mercury-url>
+ *    localspec should be tag=<mercury-url>
  *    and remotespec should just be the remote tag (it will read the
  *    actual data from the directory).
  *
@@ -852,10 +852,13 @@ static void usage(const char *msg) {
     fprintf(stderr, "\ndefault payload size is 4.\n");
     fprintf(stderr, "to enable RMA:\n");
     fprintf(stderr, "  must specify -L (on srvr) and -S and/or -R (on cli)\n");
-    fprintf(stderr, "using -O causes the server to RMA read and write to the\n");
+    fprintf(stderr, "using -O causes the server to RMA read & write to the\n");
     fprintf(stderr, "same buffer (client exports it in RDWR mode)\n");
     fprintf(stderr, "default value for -L is 0 (disables RMA on server)\n");
     fprintf(stderr, "for -X/-Y: count=-1 disable cache, count=0 unlimited\n");
+    fprintf(stderr, "when using -d, localspec should be tag=<mercury-url>\n");
+    fprintf(stderr, "(remotespec should just be the remote tag to read\n");
+    fprintf(stderr, "from the address passing directory)\n");
     exit(1);
 }
 
