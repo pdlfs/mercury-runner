@@ -1153,7 +1153,7 @@ char *load_dir_addr(int n) {
 static void clean_dir_addrs() {
     int lcv;
     char file[128];
-    if (g.dir == NULL)
+    if (!is || g.dir == NULL)
         return;
     for (lcv = 0 ; lcv < g.ninst ; lcv++) {
         snprintf(file, sizeof(file), "s.%s.%d", is[lcv].remoteid, lcv);
