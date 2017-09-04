@@ -65,6 +65,7 @@
  *  -c count     number of RPCs to perform
  *  -d dir       shared directory to pass server address through
  *  -l limit     limit # of concurrent client RPC requests ("-l 1" = serial)
+ *  -M           run mercury-runner under mpirun (MPI mode)
  *  -m mode      c, s, cs (client, server, or both)
  *  -p baseport  base port number
  *  -q           quiet mode - don't print during RPCs
@@ -129,6 +130,25 @@
  *
  * ./mercury-runner -l 16 -d `pwd` -q -c 1000 -m cs 1 h0=bmi+tcp h1
  * ./mercury-runner -l 16 -d `pwd` -q -c 1000 -m cs 1 h1=bmi+tcp h0
+ *
+ * for MPI mode: we must be run in an MPI world with exactly 2 procs.
+ * (in this case MPI is being used to launch mercury-runner but may
+ * not be used for transport..)    rank 0 becomes the "local" proc
+ * and rank 1 becomes the "remote" proc.  we assume that mpirun
+ * has been told to use the hosts that match the local and remote
+ * specs on the command line.
+ *
+ * bidirectional:
+ *   mpirun -n 2 ./mercury-runner -c 3 -l 1 -M -m cs \
+ *              1 bmi+tcp://localhost:5555 bmi+tcp://localhost:5556
+ *
+ * single direction:
+ *   mpirun -n 2 ./mercury-runner -c 3 -l 1 -M -m c \
+ *              1 bmi+tcp://localhost:5555 bmi+tcp://localhost:5556
+ *
+ * for single direction, rank 1 has its mode toggled from the given -m
+ * value.  also, you must specify both remote and local specs when
+ * using MPI mode (even for "-m s").
  */
 
 #include <assert.h>
@@ -150,6 +170,107 @@
 #include <mercury.h>
 #include <mercury_macros.h>
 
+#ifdef MPI_RUNNER
+#include <mpi.h>
+#endif
+
+/*
+ * default values for port and count
+ */
+#define DEF_BASEPORT 19900 /* starting TCP port we listen on (instance 0) */
+#define DEF_COUNT 5        /* default # of msgs to send and recv in a run */
+#define DEF_TIMEOUT 120    /* alarm timeout */
+
+/* operation modes - can be used as a bitmask or a value */
+#define MR_CLIENT 1        /* client */
+#define MR_SERVER 2        /* server */
+#define MR_CLISRV 3        /* client and server */
+
+struct callstate;          /* forward decl. for free list in struct is */
+struct respstate;
+
+/*
+ * g: shared global data (e.g. from the command line)
+ */
+struct g {
+    int ninst;               /* number of instances */
+    char *localspec;         /* local address spec */
+    char *localtag;          /* if using "-d" - the local tag */
+    char *remotespec;        /* remote address spec */
+    int baseport;            /* base port number */
+    int count;               /* number of msgs to send/recv in a run */
+    char *dir;               /* shared directory (mainly for mpi) */
+    int mpimode;             /* running under mpirun */
+    int mode;                /* operation mode (MR_CLIENT, etc.) */
+    char modestr[4];         /* mode string */
+    int limit;               /* limit # of concurrent RPCs at client */
+    int quiet;               /* don't print so much */
+    int rflag;               /* -r tag suffix spec'd */
+    int rflagval;            /* value for -r */
+    int timeout;             /* alarm timeout */
+    char tagsuffix[64];      /* tag suffix: ninst-count-mode-limit-run# */
+
+    /*
+     * in/out req size includes byte used for seq and code.  if they
+     * are zero then we just have the seq number (4 bytes).  otherwise
+     * they must be >= 8 to account for the extended format of the
+     * buffer.  this does not include bulk handle information.
+     */
+    int inreqsz;             /* input request size */
+    int outreqsz;            /* output request size */
+
+    /* bulk sizes, if zero, then we don't do any bulk operations */
+    int64_t blrmasz;         /* server's local rma buffer size */
+    int64_t bsendsz;         /* cli bulk send size (server RMA reads) */
+    int64_t brecvsz;         /* cli bulk recv size (server RMA writes) */
+    int oneflag;             /* one flag (server read/write same buffer) */
+
+    int extend_rpcin;        /* set to 1 if using extended format */
+    int extend_rpcout;       /* set to 1 if using extended format */
+
+    /* cache max sizes: -1=disable cache, 0=unlimited, otherwise limit */
+    int xcallcachemax;       /* call cache max size (in entries) */
+    int yrespcachemax;       /* resp cache max size (in entries) */
+} g;
+
+/*
+ * is: per-instance state structure.   we malloc an array of these at
+ * startup.
+ */
+struct is {
+    int n;                   /* our instance number (0 .. n-1) */
+    hg_class_t *hgclass;     /* class for this instance */
+    hg_context_t *hgctx;     /* context for this instance */
+    hg_id_t myrpcid;         /* the ID of the instance's RPC */
+    pthread_t nthread;       /* network thread */
+    char myid[256];          /* my local merc address */
+    char remoteid[256];      /* remote merc address */
+    hg_addr_t remoteaddr;    /* encoded remote address */
+    char myfun[64];          /* my function name */
+    int nprogress;           /* number of times through progress loop */
+    int ntrigger;            /* number of times trigger called */
+    int recvd;               /* server: request callback received */
+    int responded;           /* server: completed responses */
+    struct respstate *rfree; /* server: free resp state structures */
+    int nrfree;              /* length of rfree list */
+
+    /* client side sending flow control */
+    pthread_mutex_t slock;   /* lock for this block of vars */
+    pthread_cond_t scond;    /* client blocks here if waiting for network */
+    int scond_mode;          /* mode for scond */
+    int nstarted;            /* number of RPCs started */
+    int nsent;               /* number of RPCs successfully sent */
+#define SM_OFF      0        /* don't signal client */
+#define SM_SENTONE  1        /* finished sending an RPC */
+#define SM_SENTALL  2        /* finished sending all RPCs */
+    struct callstate *cfree; /* free call state structures */
+    int ncfree;              /* length of cfree list */
+
+    /* no mutex since only the main thread can write it */
+    int sends_done;          /* set to non-zero when nsent is done */
+};
+struct is *is;    /* an array of state */
+
 /*
  * helper/utility functions, included inline here so we are self-contained
  * in one single source file...
@@ -168,6 +289,9 @@ void vcomplain(int ret, const char *format, va_list ap) {
     fprintf(stderr, "\n");
     if (ret) {
         clean_dir_addrs();
+#ifdef MPI_RUNNER
+        if (g.mpimode == 1) MPI_Finalize();
+#endif
         exit(ret);
     }
 }
@@ -266,102 +390,6 @@ int64_t getsize(char *from) {
 /*
  * end of helper/utility functions.
  */
-
-/*
- * default values for port and count
- */
-#define DEF_BASEPORT 19900 /* starting TCP port we listen on (instance 0) */
-#define DEF_COUNT 5        /* default # of msgs to send and recv in a run */
-#define DEF_TIMEOUT 120    /* alarm timeout */
-
-/* operation modes - can be used as a bitmask or a value */
-#define MR_CLIENT 1        /* client */
-#define MR_SERVER 2        /* server */
-#define MR_CLISRV 3        /* client and server */
-
-struct callstate;          /* forward decl. for free list in struct is */
-struct respstate;
-
-/*
- * g: shared global data (e.g. from the command line)
- */
-struct g {
-    int ninst;               /* number of instances */
-    char *localspec;         /* local address spec */
-    char *localtag;          /* if using "-d" - the local tag */
-    char *remotespec;        /* remote address spec */
-    int baseport;            /* base port number */
-    int count;               /* number of msgs to send/recv in a run */
-    char *dir;               /* shared directory (mainly for mpi) */
-    int mode;                /* operation mode (MR_CLIENT, etc.) */
-    char modestr[4];         /* mode string */
-    int limit;               /* limit # of concurrent RPCs at client */
-    int quiet;               /* don't print so much */
-    int rflag;               /* -r tag suffix spec'd */
-    int rflagval;            /* value for -r */
-    int timeout;             /* alarm timeout */
-    char tagsuffix[64];      /* tag suffix: ninst-count-mode-limit-run# */
-
-    /*
-     * in/out req size includes byte used for seq and code.  if they
-     * are zero then we just have the seq number (4 bytes).  otherwise
-     * they must be >= 8 to account for the extended format of the
-     * buffer.  this does not include bulk handle information.
-     */
-    int inreqsz;             /* input request size */
-    int outreqsz;            /* output request size */
-
-    /* bulk sizes, if zero, then we don't do any bulk operations */
-    int64_t blrmasz;         /* server's local rma buffer size */
-    int64_t bsendsz;         /* cli bulk send size (server RMA reads) */
-    int64_t brecvsz;         /* cli bulk recv size (server RMA writes) */
-    int oneflag;             /* one flag (server read/write same buffer) */
-
-    int extend_rpcin;        /* set to 1 if using extended format */
-    int extend_rpcout;       /* set to 1 if using extended format */
-
-    /* cache max sizes: -1=disable cache, 0=unlimited, otherwise limit */
-    int xcallcachemax;       /* call cache max size (in entries) */
-    int yrespcachemax;       /* resp cache max size (in entries) */
-} g;
-
-/*
- * is: per-instance state structure.   we malloc an array of these at
- * startup.
- */
-struct is {
-    int n;                   /* our instance number (0 .. n-1) */
-    hg_class_t *hgclass;     /* class for this instance */
-    hg_context_t *hgctx;     /* context for this instance */
-    hg_id_t myrpcid;         /* the ID of the instance's RPC */
-    pthread_t nthread;       /* network thread */
-    char myid[256];          /* my local merc address */
-    char remoteid[256];      /* remote merc address */
-    hg_addr_t remoteaddr;    /* encoded remote address */
-    char myfun[64];          /* my function name */
-    int nprogress;           /* number of times through progress loop */
-    int ntrigger;            /* number of times trigger called */
-    int recvd;               /* server: request callback received */
-    int responded;           /* server: completed responses */
-    struct respstate *rfree; /* server: free resp state structures */
-    int nrfree;              /* length of rfree list */
-
-    /* client side sending flow control */
-    pthread_mutex_t slock;   /* lock for this block of vars */
-    pthread_cond_t scond;    /* client blocks here if waiting for network */
-    int scond_mode;          /* mode for scond */
-    int nstarted;            /* number of RPCs started */
-    int nsent;               /* number of RPCs successfully sent */
-#define SM_OFF      0        /* don't signal client */
-#define SM_SENTONE  1        /* finished sending an RPC */
-#define SM_SENTALL  2        /* finished sending all RPCs */
-    struct callstate *cfree; /* free call state structures */
-    int ncfree;              /* length of cfree list */
-
-    /* no mutex since only the main thread can write it */
-    int sends_done;          /* set to non-zero when nsent is done */
-};
-struct is *is;    /* an array of state */
 
 /*
  * lookup_state: for looking up an address
@@ -805,6 +833,9 @@ void sigalarm(int foo) {
     }
     clean_dir_addrs();
     fprintf(stderr, "Alarm clock\n");
+#ifdef MPI_RUNNER
+    if (g.mpimode == 1) MPI_Finalize();
+#endif
     exit(1);
 }
 
@@ -834,6 +865,11 @@ static void usage(const char *msg) {
     fprintf(stderr, "\t-c count    number of RPCs to perform\n");
     fprintf(stderr, "\t-d dir      shared dir for passing server addresses\n");
     fprintf(stderr, "\t-l limit    limit # of client concurrent RPCs\n");
+#ifdef MPI_RUNNER
+    fprintf(stderr, "\t-M          run mercury-runner under MPI (MPI mode)\n");
+#else
+    fprintf(stderr, "\t-M          (MPI mode not compiled in)\n");
+#endif
     fprintf(stderr, "\t-m mode     mode c, s, or cs (client/server)\n");
     fprintf(stderr, "\t-p port     base port number\n");
     fprintf(stderr, "\t-q          quiet mode\n");
@@ -859,6 +895,9 @@ static void usage(const char *msg) {
     fprintf(stderr, "when using -d, localspec should be tag=<mercury-url>\n");
     fprintf(stderr, "(remotespec should just be the remote tag to read\n");
     fprintf(stderr, "from the address passing directory)\n");
+#ifdef MPI_RUNNER
+    if (g.mpimode == 1) MPI_Finalize();
+#endif
     exit(1);
 }
 
@@ -893,7 +932,7 @@ int main(int argc, char **argv) {
     g.baseport = DEF_BASEPORT;
     g.timeout = DEF_TIMEOUT;
 
-    while ((ch = getopt(argc, argv, "c:d:i:l:m:o:p:qr:t:L:OR:S:X:Y:")) != -1) {
+    while ((ch = getopt(argc, argv, "c:d:i:l:Mm:o:p:qr:t:L:OR:S:X:Y:")) != -1) {
         switch (ch) {
             case 'c':
                 g.count = atoi(optarg);
@@ -909,6 +948,13 @@ int main(int argc, char **argv) {
             case 'l':
                 g.limit = atoi(optarg);
                 if (g.limit < 1) usage("bad limit");
+                break;
+            case 'M':
+#ifdef MPI_RUNNER
+                g.mpimode = -1;
+#else
+                complain(1, "not compiled with MPI, can't -M");
+#endif
                 break;
             case 'm':
                 if (strcmp(optarg, "c") == 0)
@@ -969,17 +1015,57 @@ int main(int argc, char **argv) {
     argc -= optind;
     argv += optind;
 
-    /* remotespec is optional if in server mode */
+    /* remotespec is optional if in server mode (unless mpimode) */
     if ((g.mode == MR_SERVER && (argc < 2 || argc > 3)) ||
         (g.mode != MR_SERVER && argc != 3))
         usage("bad args");
 
-    if (g.oneflag && (g.brecvsz == 0 || g.bsendsz == 0))
-        usage("-O only applies if -R and -S are set");
-
     g.ninst = n = atoi(argv[0]);
     g.localspec = argv[1];
     g.remotespec = (argc == 3) ? argv[2] : NULL;
+
+#ifdef MPI_RUNNER
+    if (g.mpimode) {
+        int myrank, mysize, newmode;
+        if (g.dir)
+            complain(1, "MPI mode currently doesn't work with -d");
+        if (MPI_Init(&argc, &argv) != MPI_SUCCESS) {
+            g.mpimode = 0;
+            complain(1, "MPI_Init failed!");
+        }
+        g.mpimode = 1;
+        if (g.mode == MR_SERVER && argc == 2)
+            complain(1, "MPI mode requires remotespec for servers");
+        if (MPI_Comm_rank(MPI_COMM_WORLD, &myrank) != MPI_SUCCESS)
+            complain(1, "MPI_Comm_rank failed!");
+        if (MPI_Comm_size(MPI_COMM_WORLD, &mysize) != MPI_SUCCESS)
+            complain(1, "MPI_Comm_size failed!");
+        if (mysize != 2)
+            complain(1, "Bad MPI world size, must have exactly 2 procs");
+
+        /* ok, now edit the command line for rank 1 */
+        if (myrank == 1) {
+            char *tmp;
+            /* swap local and remote specs */
+            tmp = g.localspec;
+            g.localspec = g.remotespec;
+            g.remotespec = tmp;
+
+            if (g.mode == MR_SERVER) {
+                newmode = MR_CLIENT;
+            } else if (g.mode == MR_CLIENT) {
+                newmode = MR_SERVER;
+            } else {
+                newmode = g.mode;  /* no change for client server */
+            }
+            g.mode = newmode;
+        }
+    }
+#endif
+
+    if (g.oneflag && (g.brecvsz == 0 || g.bsendsz == 0))
+        usage("-O only applies if -R and -S are set");
+
     if (!g.limit)
         g.limit = g.count;    /* max value */
     if (g.dir) {
@@ -1005,6 +1091,7 @@ int main(int argc, char **argv) {
 
     printf("\n%s options:\n", argv0);
     printf("\tninstances = %d\n", n);
+    printf("\tmpimode    = %s\n", (g.mpimode) ? "ON" : "OFF");
     printf("\tlocalspec  = %s\n", g.localspec);
     if (g.localtag)
         printf("\tlocaltag   = %s\n", g.localtag);
@@ -1073,6 +1160,9 @@ int main(int argc, char **argv) {
     printf("main exiting...\n");
 
     clean_dir_addrs();
+#ifdef MPI_RUNNER
+    if (g.mpimode == 1) MPI_Finalize();
+#endif
     exit(0);
 }
 
