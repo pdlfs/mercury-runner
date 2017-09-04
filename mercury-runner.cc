@@ -140,12 +140,14 @@
  * specs on the command line.
  *
  * bidirectional:
- *   mpirun -n 2 ./mercury-runner -c 3 -l 1 -M -m cs \
- *              1 bmi+tcp://localhost:5555 bmi+tcp://localhost:5556
+ *   mpirun -n 2 -ppn 1 --host h0,h1 \
+ *      ./mercury-runner -c 3 -l 1 -M -m cs -q -s /tmp/llogg \
+ *      1 bmi+tcp://h0:5555 bmi+tcp://h1:5556
  *
  * single direction:
- *   mpirun -n 2 ./mercury-runner -c 3 -l 1 -M -m c \
- *              1 bmi+tcp://localhost:5555 bmi+tcp://localhost:5556
+ *   mpirun -n 2 -ppn 1 --host h0,h1 \
+ *      ./mercury-runner -c 3 -l 1 -M -m c -q -s /tmp/llogg \
+ *      1 bmi+tcp://h0:5555 bmi+tcp://h1:5556
  *
  * for single direction, rank 1 has its mode toggled from the given -m
  * value.  also, you must specify both remote and local specs when
