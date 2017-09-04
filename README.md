@@ -48,6 +48,7 @@ options:
 	-p port     base port number
 	-q          quiet mode
 	-r n        enable tag suffix with this run number
+        -s file     save copy of our output in this file
 	-t sec      timeout (alarm), in seconds
 
 use '-l 1' to serialize RPCs
@@ -138,7 +139,7 @@ with "-DMPI=ON" via cmake (this causes cmake to link mercury-runner
 with the MPI libs.   Here is an example of using -M with MPICH:
 ```
         mpirun -n 2 -ppn 1 --host h0,h1 \
-            ./mercury-runner -c 3 -l 1 -M -m cs -q -s /tmp/llogg \
+            ./mercury-runner -c 3 -l 1 -M -m cs -q -s /tmp/log \
             1 bmi+tcp://h0:5555 bmi+tcp://h1:5556
 ```
 In this example, MPICH runs two processes: one on host h0 and the
@@ -150,6 +151,11 @@ so that the connection can be made.   Note that it is critical
 that the the hosts used with MPI ("--host h0,h1") match the hosts
 used in the mercury URLs ("bmi+tcp://h0:5555") or the connection
 will fail.
+
+The "-s" option can be used to save an extra copy of the mercury-runner
+output to the given file.  When running in MPI mode (-M), the rank
+numbers are appended to the filename (for example, "-s /tmp/log"
+would generate "/tmp/log.0" from rank 0 and "/tmp/log.1" from rank 1).
 
 # to compile
 
