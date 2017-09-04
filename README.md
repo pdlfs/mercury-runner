@@ -43,6 +43,7 @@ options:
 	-c count    number of RPCs to perform
 	-d dir      shared dir for passing server addresses
 	-l limit    limit # of client concurrent RPCs
+        -M          run mercury-runner under MPI (MPI mode)
 	-m mode     mode c, s, or cs (client/server)
 	-p port     base port number
 	-q          quiet mode
@@ -129,11 +130,33 @@ second command does the opposite).
       ./mercury-runner -l 16 -d `pwd` -q -c 1000 -m cs 1 h1=bmi+tcp h0
 ```
 
+The -M option may be used to launch both processes of mercury-runner
+with one MPI command rather than starting them individually.  In this
+case one process is rank 0 and the other is rank 1 within a single
+MPI job.  To enable the -M option, mercury-runner must be configured
+with "-DMPI=ON" via cmake (this causes cmake to link mercury-runner
+with the MPI libs.   Here is an example of using -M with MPICH:
+```
+        mpirun -n 2 -ppn 1 --host h0,h1 \
+            ./mercury-runner -c 3 -l 1 -M -m cs -q -s /tmp/llogg \
+            1 bmi+tcp://h0:5555 bmi+tcp://h1:5556
+```
+In this example, MPICH runs two processes: one on host h0 and the
+other on host h1.  The mercury-runner program will have each process
+use MPI to determine their rank.  The process with rank 1 will
+swap the local and remote mercury URL specs from the command line
+and toggle the mode from client to server (or server to client)
+so that the connection can be made.   Note that it is critical
+that the the hosts used with MPI ("--host h0,h1") match the hosts
+used in the mercury URLs ("bmi+tcp://h0:5555") or the connection
+will fail.
+
 # to compile
 
 First, you need to know where mercury is installed and you need cmake.
 To compile with a build subdirectory, starting from the top-level
-source dir:
+source dir (add "-DMPI=ON" to the cmake command line to enable the
+"-M" MPI option):
 
 ```
   mkdir build
