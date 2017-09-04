@@ -150,6 +150,9 @@
  * for single direction, rank 1 has its mode toggled from the given -m
  * value.  also, you must specify both remote and local specs when
  * using MPI mode (even for "-m s").
+ *
+ * note that for MP mode, if "-s" is used to save output a ".N" is
+ * appended to the filename (where N is either 0 or 1 based on the rank).
  */
 
 #include <assert.h>
