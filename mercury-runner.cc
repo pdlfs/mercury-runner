@@ -70,6 +70,7 @@
  *  -p baseport  base port number
  *  -q           quiet mode - don't print during RPCs
  *  -r n         enable tag suffix with this run number
+ *  -s file      save copy of our output in this file
  *  -t secs      timeout (alarm)
  *
  * size related options:
@@ -207,6 +208,7 @@ struct g {
     int quiet;               /* don't print so much */
     int rflag;               /* -r tag suffix spec'd */
     int rflagval;            /* value for -r */
+    FILE *savefp;            /* save copy of outputhere */
     int timeout;             /* alarm timeout */
     char tagsuffix[64];      /* tag suffix: ninst-count-mode-limit-run# */
 
@@ -280,18 +282,53 @@ char *argv0;                     /* argv[0], program name */
 static void clean_dir_addrs();   /* for complain exit */
 
 /*
+ * fprint2: fprintf() wrapper
+ */
+int fprint2(FILE *stream, const char *format, ...) {
+    int rv;
+    va_list ap;
+    va_start(ap, format);
+    rv = vfprintf(stream, format, ap);
+    va_end(ap);
+    va_start(ap, format);
+    if (g.savefp) vfprintf(g.savefp, format, ap);
+    va_end(ap);
+    return(rv);
+}
+
+/*
+ * print2: printf() wrapper
+ */
+int print2(const char *format, ...) {
+    int rv;
+    va_list ap;
+    va_start(ap, format);
+    rv = vprintf(format, ap);
+    va_end(ap);
+    va_start(ap, format);
+    if (g.savefp) vfprintf(g.savefp, format, ap);
+    va_end(ap);
+    return(rv);
+}
+
+/*
  * vcomplain/complain about something.  if ret is non-zero we exit(ret) after
  * complaining....
  */
 void vcomplain(int ret, const char *format, va_list ap) {
-    fprintf(stderr, "%s: ", argv0);
+    fprint2(stderr, "%s: ", argv0);
     vfprintf(stderr, format, ap);
-    fprintf(stderr, "\n");
+    if (g.savefp) vfprintf(g.savefp, format, ap);
+    fprint2(stderr, "\n");
     if (ret) {
         clean_dir_addrs();
 #ifdef MPI_RUNNER
-        if (g.mpimode == 1) MPI_Finalize();
+        if (g.mpimode > 0) MPI_Finalize();
 #endif
+        if (g.savefp) {
+            fclose(g.savefp);
+            g.savefp = NULL;
+        }
         exit(ret);
     }
 }
@@ -818,24 +855,28 @@ void free_respstate(struct respstate *rs) {
  */
 void sigalarm(int foo) {
     int lcv;
-    fprintf(stderr, "SIGALRM detected\n");
+    fprint2(stderr, "SIGALRM detected\n");
     for (lcv = 0 ; lcv < g.ninst ; lcv++) {
-        fprintf(stderr, "%d: @alarm: ", lcv);
+        fprint2(stderr, "%d: @alarm: ", lcv);
         if (is[lcv].hgctx == NULL) {
-            fprintf(stderr, "no context\n");
+            fprint2(stderr, "no context\n");
             continue;
         }
-        fprintf(stderr,
+        fprint2(stderr,
                 "srvr=%d(%d), clnt=%d(%d), sdone=%d, prog=%d, trig=%d\n",
                 is[lcv].recvd, is[lcv].recvd - is[lcv].responded,
                 is[lcv].nstarted, is[lcv].nstarted - is[lcv].nsent,
                 is[lcv].sends_done, is[lcv].nprogress, is[lcv].ntrigger);
     }
     clean_dir_addrs();
-    fprintf(stderr, "Alarm clock\n");
+    fprint2(stderr, "Alarm clock\n");
 #ifdef MPI_RUNNER
-    if (g.mpimode == 1) MPI_Finalize();
+    if (g.mpimode > 0) MPI_Finalize();
 #endif
+    if (g.savefp) {
+        fclose(g.savefp);
+        g.savefp = NULL;
+    }
     exit(1);
 }
 
@@ -874,6 +915,7 @@ static void usage(const char *msg) {
     fprintf(stderr, "\t-p port     base port number\n");
     fprintf(stderr, "\t-q          quiet mode\n");
     fprintf(stderr, "\t-r n        enable tag suffix with this run number\n");
+    fprintf(stderr, "\t-s file     save copy of our output in this file\n");
     fprintf(stderr, "\t-t sec      timeout (alarm), in seconds\n");
     fprintf(stderr, "\nuse '-l 1' to serialize RPCs\n\n");
     fprintf(stderr, "size related options:\n");
@@ -896,8 +938,12 @@ static void usage(const char *msg) {
     fprintf(stderr, "(remotespec should just be the remote tag to read\n");
     fprintf(stderr, "from the address passing directory)\n");
 #ifdef MPI_RUNNER
-    if (g.mpimode == 1) MPI_Finalize();
+    if (g.mpimode > 0) MPI_Finalize();
 #endif
+    if (g.savefp) {
+        fclose(g.savefp);
+        g.savefp = NULL;
+    }
     exit(1);
 }
 
@@ -916,6 +962,7 @@ int main(int argc, char **argv) {
     pthread_t *tarr;
     struct useprobe mainuse;
     char mytag[128];
+    char *savefile;
     argv0 = argv[0];
 
     /* we want lines, even if we are writing to a pipe */
@@ -927,12 +974,14 @@ int main(int argc, char **argv) {
 
     /* setup default to zero/null, except as noted below */
     memset(&g, 0, sizeof(g));
+    savefile = NULL;
     g.count = DEF_COUNT;
     g.mode = MR_CLISRV;
     g.baseport = DEF_BASEPORT;
     g.timeout = DEF_TIMEOUT;
 
-    while ((ch = getopt(argc, argv, "c:d:i:l:Mm:o:p:qr:t:L:OR:S:X:Y:")) != -1) {
+    while ((ch = getopt(argc, argv,
+                        "c:d:i:l:Mm:o:p:qr:t:L:OR:S:s:X:Y:")) != -1) {
         switch (ch) {
             case 'c':
                 g.count = atoi(optarg);
@@ -1000,6 +1049,9 @@ int main(int argc, char **argv) {
                 g.bsendsz = getsize(optarg);
                 if (g.bsendsz < 1) usage("bad bulk send size");
                 break;
+            case 's':
+                savefile = optarg;
+                break;
             case 'X':
                 g.xcallcachemax = atoi(optarg);
                 if (g.xcallcachemax < -1) usage("bad xcallcache max");
@@ -1046,6 +1098,8 @@ int main(int argc, char **argv) {
         /* ok, now edit the command line for rank 1 */
         if (myrank == 1) {
             char *tmp;
+
+            g.mpimode = 2;    /* indicates we are run 1 */
             /* swap local and remote specs */
             tmp = g.localspec;
             g.localspec = g.remotespec;
@@ -1089,50 +1143,72 @@ int main(int argc, char **argv) {
     if (g.outreqsz)
         g.extend_rpcout = 1;
 
-    printf("\n%s options:\n", argv0);
-    printf("\tninstances = %d\n", n);
-    printf("\tmpimode    = %s\n", (g.mpimode) ? "ON" : "OFF");
-    printf("\tlocalspec  = %s\n", g.localspec);
+    if (savefile != NULL) {
+        char *tmpsave = savefile;
+        if (g.mpimode) {
+            int newlen = strlen(savefile)+3;  /* ".?" plus null @ end */
+            tmpsave = (char *)malloc(newlen);
+            if (!tmpsave)
+                complain(1, "malloc savefile failed?!");
+            snprintf(tmpsave, newlen, "%s.%d", savefile,
+                     (g.mpimode == 1) ? 0 : 1);
+        }
+        g.savefp = fopen(tmpsave, "w");
+        if (!g.savefp) {
+            fprint2(stderr, "savefile fopen(%s) failed?!!\n", tmpsave);
+        } else {
+            setlinebuf(g.savefp);
+        }
+        if (tmpsave != savefile)
+            free(tmpsave);
+    }
+
+    print2("\n%s options:\n", argv0);
+    print2("\tninstances = %d\n", n);
+    print2("\tmpimode    = %s\n", (g.mpimode) ? "ON" : "OFF");
+    print2("\tlocalspec  = %s\n", g.localspec);
     if (g.localtag)
-        printf("\tlocaltag   = %s\n", g.localtag);
-    printf("\tremotespec = %s\n", (g.remotespec) ? g.remotespec : "<none>");
+        print2("\tlocaltag   = %s\n", g.localtag);
+    print2("\tremotespec = %s\n", (g.remotespec) ? g.remotespec : "<none>");
     if (g.dir)
-        printf("\tdirectory  = %s\n", g.dir);
-    printf("\tbaseport   = %d\n", g.baseport);
-    printf("\tcount      = %d\n", g.count);
-    printf("\tmode       = %s\n", g.modestr);
+        print2("\tdirectory  = %s\n", g.dir);
+    print2("\tbaseport   = %d\n", g.baseport);
+    print2("\tcount      = %d\n", g.count);
+    print2("\tmode       = %s\n", g.modestr);
     if (g.extend_rpcin || g.extend_rpcout)
-        printf("\textend     =%s%s\n",
+        print2("\textend     =%s%s\n",
                (g.extend_rpcin) ? " in" : "", (g.extend_rpcout) ? " out" : "");
 
     if (g.limit == g.count)
-        printf("\tlimit      = <none>\n");
+        print2("\tlimit      = <none>\n");
     else
-        printf("\tlimit      = %d\n", g.limit);
-    printf("\tquiet      = %d\n", g.quiet);
+        print2("\tlimit      = %d\n", g.limit);
+    print2("\tquiet      = %d\n", g.quiet);
     if (g.rflag)
-        printf("\tsuffix     = %s\n", g.tagsuffix);
-    printf("\ttimeout    = %d\n", g.timeout);
-    printf("sizes:\n");
-    printf("\tinput      = %d\n", (g.inreqsz == 0) ? 4 : g.inreqsz);
-    printf("\toutput     = %d\n", (g.outreqsz == 0) ? 4 : g.outreqsz);
+        print2("\tsuffix     = %s\n", g.tagsuffix);
+    if (savefile)
+        print2("\tsavefile   = %s\n", savefile);
+    print2("\ttimeout    = %d\n", g.timeout);
+    print2("sizes:\n");
+    print2("\tinput      = %d\n", (g.inreqsz == 0) ? 4 : g.inreqsz);
+    print2("\toutput     = %d\n", (g.outreqsz == 0) ? 4 : g.outreqsz);
     if (g.blrmasz)
-        printf("\tlrmasize   = %" PRId64 "\n", g.blrmasz);
+        print2("\tlrmasize   = %" PRId64 "\n", g.blrmasz);
     if (g.bsendsz)
-        printf("\tbulksend   = %" PRId64 "\n", g.bsendsz);
+        print2("\tbulksend   = %" PRId64 "\n", g.bsendsz);
     if (g.brecvsz)
-        printf("\tbulkrecv   = %" PRId64 "\n", g.brecvsz);
+        print2("\tbulkrecv   = %" PRId64 "\n", g.brecvsz);
     if (g.bsendsz && g.brecvsz)
-        printf("\tonebuffer  = %d\n", g.oneflag);
+        print2("\tonebuffer  = %d\n", g.oneflag);
     if (g.xcallcachemax)
-        printf("\tcallcache  = %d max\n", g.xcallcachemax);
+        print2("\tcallcache  = %d max\n", g.xcallcachemax);
     if (g.yrespcachemax)
-        printf("\trespcache  = %d max\n", g.yrespcachemax);
-    printf("\n");
+        print2("\trespcache  = %d max\n", g.yrespcachemax);
+    print2("\n");
 
     signal(SIGALRM, sigalarm);
     alarm(g.timeout);
-    printf("main: starting %d instance%s ...\n", n, (n == 1) ? "" : "s");
+    print2("main: starting %d instance%s ...\n", n, (n == 1) ? "" : "s");
     tarr = (pthread_t *)malloc(n * sizeof(pthread_t));
     if (!tarr) complain(1, "malloc tarr thread array failed");
     is = (struct is *)malloc(n *sizeof(*is));    /* array */
@@ -1149,20 +1225,25 @@ int main(int argc, char **argv) {
     }
 
     /* now wait for everything to finish */
-    printf("main: collecting\n");
+    print2("main: collecting\n");
     for (lcv = 0 ; lcv < n ; lcv++) {
         pthread_join(tarr[lcv], NULL);
     }
     useprobe_end(&mainuse);
-    printf("main: collection done.\n");
+    print2("main: collection done.\n");
     snprintf(mytag, sizeof(mytag), "ALL%s", g.tagsuffix);
     useprobe_print(stdout, &mainuse, mytag, -1);
-    printf("main exiting...\n");
+    if (g.savefp) useprobe_print(g.savefp, &mainuse, mytag, -1);
+    print2("main exiting...\n");
 
     clean_dir_addrs();
 #ifdef MPI_RUNNER
-    if (g.mpimode == 1) MPI_Finalize();
+    if (g.mpimode > 0) MPI_Finalize();
 #endif
+    if (g.savefp) {
+        fclose(g.savefp);
+        g.savefp = NULL;
+    }
     exit(0);
 }
 
@@ -1236,7 +1317,7 @@ char *load_dir_addr(int n) {
     if (fread(retbuf, 1, st.st_size, fp) != st.st_size)
         complain(1, "load_dir_addr: fread failed");
     fclose(fp);
-    printf("%d: resolved remote tag %s to %s\n", n, is[n].remoteid, retbuf);
+    print2("%d: resolved remote tag %s to %s\n", n, is[n].remoteid, retbuf);
     return(retbuf);
 }
 
@@ -1270,7 +1351,7 @@ void *run_instance(void *arg) {
     struct callstate *cs;
     unsigned char data;
 
-    printf("%d: instance running\n", n);
+    print2("%d: instance running\n", n);
     is[n].n = n;    /* make it easy to map 'is' structure back to n */
 
     /*
@@ -1288,7 +1369,7 @@ void *run_instance(void *arg) {
         snprintf(is[n].remoteid, sizeof(is[n].remoteid), g.remotespec,
                  n + g.baseport);
 
-    printf("%d: init local endpoint: %s\n", n, is[n].myid);
+    print2("%d: init local endpoint: %s\n", n, is[n].myid);
     is[n].hgclass = HG_Init(is[n].myid,
                             (g.mode == MR_CLIENT) ? HG_FALSE : HG_TRUE);
     if (is[n].hgclass == NULL)  complain(1, "HG_init failed");
@@ -1317,7 +1398,7 @@ void *run_instance(void *arg) {
 
     if (g.mode != MR_SERVER) {    /* plain server-only can start right away */
         /* poor man's barrier */
-        printf("%d: init done.  sleeping 10\n", n);
+        print2("%d: init done.  sleeping 10\n", n);
         sleep(10);
     }
 
@@ -1327,7 +1408,7 @@ void *run_instance(void *arg) {
      */
     if (g.mode & MR_CLIENT) {
         remoteurl = (g.dir) ? load_dir_addr(n) : is[n].remoteid;
-        printf("%d: remote address lookup %s\n", n, remoteurl);
+        print2("%d: remote address lookup %s\n", n, remoteurl);
         if (pthread_mutex_init(&lst.lock, NULL) != 0)
             complain(1, "lst.lock mutex init");
         pthread_mutex_lock(&lst.lock);
@@ -1349,10 +1430,10 @@ void *run_instance(void *arg) {
         pthread_mutex_destroy(&lst.lock);
         if (remoteurl != is[n].remoteid) free(remoteurl);
         remoteurl = NULL;
-        printf("%d: done remote address lookup\n", n);
+        print2("%d: done remote address lookup\n", n);
 
         /* poor man's barrier again... */
-        printf("%d: address lookup done.  sleeping 10 again\n", n);
+        print2("%d: address lookup done.  sleeping 10 again\n", n);
         sleep(10);
     }
 
@@ -1363,11 +1444,11 @@ void *run_instance(void *arg) {
 #endif
 
     if (g.mode == MR_SERVER) {
-        printf("%d: server mode, skipping send step\n", n);
+        print2("%d: server mode, skipping send step\n", n);
         goto skipsend;
     }
 
-    printf("%d: sending...\n", n);
+    print2("%d: sending...\n", n);
     if (pthread_mutex_init(&is[n].slock, NULL) != 0)
         complain(1, "slock mutex init");
     is[n].nsent = 0;
@@ -1383,17 +1464,17 @@ void *run_instance(void *arg) {
             data = random();
             *((char *)cs->rd_rmabuf) = data;  /* data for sanity check */
             if (!g.quiet)
-                printf("%d: prelaunch %d: set data to %d\n", n, lcv, data);
+                print2("%d: prelaunch %d: set data to %d\n", n, lcv, data);
         }
 
 
         if (!g.quiet)
-            printf("%d: launching %d\n", n, lcv);
+            print2("%d: launching %d\n", n, lcv);
         ret = HG_Forward(cs->callhand, forw_cb, cs, &cs->in);
         is[n].nstarted++;
         if (ret != HG_SUCCESS) complain(1, "hg forward failed");
         if (!g.quiet)
-            printf("%d: launched %d (size=%d)\n", n, lcv, (int)cs->in.sersize);
+            print2("%d: launched %d (size=%d)\n", n, lcv, (int)cs->in.sersize);
 
         /* flow control */
         pthread_mutex_lock(&is[n].slock);
@@ -1417,7 +1498,7 @@ void *run_instance(void *arg) {
     pthread_mutex_unlock(&is[n].slock);
     pthread_mutex_destroy(&is[n].slock);
     is[n].sends_done = 1;
-    printf("%d: all sends complete\n", n);
+    print2("%d: all sends complete\n", n);
 
 skipsend:
     /* done sending, wait for network thread to finish and exit */
@@ -1427,7 +1508,7 @@ skipsend:
         is[n].remoteaddr = NULL;
     }
     useprobe_end(&rp);
-    printf("%d: all recvs complete\n", n);
+    print2("%d: all recvs complete\n", n);
 
     /* dump the callstate cache */
     while ((cs = is[n].cfree) != NULL) {
@@ -1436,22 +1517,23 @@ skipsend:
     }
     is[n].ncfree = 0;     /* just to be clear */
 
-    printf("%d: destroy context and finalize mercury\n", n);
+    print2("%d: destroy context and finalize mercury\n", n);
     HG_Context_destroy(is[n].hgctx);
     HG_Finalize(is[n].hgclass);
 
     if (g.mode & MR_CLIENT) {
         double rtime = (rp.t1.tv_sec + (rp.t1.tv_usec / 1000000.0)) -
                        (rp.t0.tv_sec + (rp.t0.tv_usec / 1000000.0));
-        printf("%d: client%s: %d rpc%s in %f sec (%f sec per op)\n",
+        print2("%d: client%s: %d rpc%s in %f sec (%f sec per op)\n",
                n, g.tagsuffix, g.count, (g.count == 1) ? "" : "s",
                rtime, rtime / (double) g.count);
     }
 
 #ifdef RUSAGE_THREAD
     useprobe_print(stdout, &rp, "instance", n);
+    if (g.savefp) useprobe_print(g.savefp, &rp, "instance", -1);
 #endif
-    printf("%d: instance done\n", n);
+    print2("%d: instance done\n", n);
     return(NULL);
 }
 
@@ -1512,11 +1594,11 @@ static hg_return_t forw_cb(const struct hg_cb_info *cbi) {
     if (!g.quiet) {
         if (cs->wr_rmabuf) {
             data = *((char *)cs->wr_rmabuf);
-            printf("%d: forw complete (code=%d,reply_size=%d, data=%d)\n",
+            print2("%d: forw complete (code=%d,reply_size=%d, data=%d)\n",
                    isp->n, ~out.ret & RPC_SEQMASK, (int)out.sersize,
                    data);
         } else {
-            printf("%d: forw complete (code=%d,reply_size=%d)\n",
+            print2("%d: forw complete (code=%d,reply_size=%d)\n",
                    isp->n, ~out.ret & RPC_SEQMASK, (int)out.sersize);
         }
     }
@@ -1573,7 +1655,7 @@ static void *run_network(void *arg) {
     is[n].recvd = is[n].responded = actual = 0;
     is[n].nprogress = is[n].ntrigger = 0;
 
-    printf("%d: network thread running\n", n);
+    print2("%d: network thread running\n", n);
 #ifdef RUSAGE_THREAD
     useprobe_start(&rn, RUSAGE_THREAD);
 #endif
@@ -1605,10 +1687,11 @@ static void *run_network(void *arg) {
 #ifdef RUSAGE_THREAD
     useprobe_end(&rn);
 #endif
-    printf("%d: network thread complete (nprogress=%d, ntrigger=%d)\n", n,
+    print2("%d: network thread complete (nprogress=%d, ntrigger=%d)\n", n,
            is[n].nprogress, is[n].ntrigger);
 #ifdef RUSAGE_THREAD
     useprobe_print(stdout, &rn, "net", n);
+    if (g.savefp) useprobe_print(g.savefp, &rn, "ret", n);
 #endif
     return(NULL);
 }
@@ -1643,7 +1726,7 @@ static hg_return_t rpchandler(hg_handle_t handle) {
 
     inseq = rs->in.seq & RPC_SEQMASK;
     if (!g.quiet)
-        printf("%d: got remote input %d (size=%d)\n", isp->n, inseq,
+        print2("%d: got remote input %d (size=%d)\n", isp->n, inseq,
                (int)rs->in.sersize);
 
     rs->out.ret = ~inseq & RPC_SEQMASK;
@@ -1693,7 +1776,7 @@ static hg_return_t advance_resp_phase(struct respstate *rs) {
 
         }
         if (!g.quiet)
-            printf("%d: %d: starting RMA read %" PRId64 " bytes\n",
+            print2("%d: %d: starting RMA read %" PRId64 " bytes\n",
                    rs->isp->n, rs->in.seq & RPC_SEQMASK, tomove);
 
         rv = HG_Bulk_transfer(rs->isp->hgctx, reply_bulk_cb, (void *)rs,
@@ -1722,7 +1805,7 @@ static hg_return_t advance_resp_phase(struct respstate *rs) {
         data = random();
         *((char *)rs->lrmabuf) = data;  /* data for sanity check */
         if (!g.quiet)
-            printf("%d: %d: starting RMA write %" PRId64 " bytes, data=%d\n",
+            print2("%d: %d: starting RMA write %" PRId64 " bytes, data=%d\n",
                    rs->isp->n, rs->in.seq & RPC_SEQMASK, tomove, data);
 
         rv = HG_Bulk_transfer(rs->isp->hgctx, reply_bulk_cb, (void *)rs,
@@ -1742,7 +1825,7 @@ static hg_return_t advance_resp_phase(struct respstate *rs) {
         rv = HG_Respond(rs->callhand, reply_sent_cb, rs, &rs->out);
         if (rv != HG_SUCCESS) complain(1, "rpchandler: HG_Respond failed");
         if (!g.quiet)
-            printf("%d: responded to %d (size=%d)\n", rs->isp->n, inseq,
+            print2("%d: responded to %d (size=%d)\n", rs->isp->n, inseq,
                    (int)rs->out.sersize);
 
     }
@@ -1769,11 +1852,11 @@ static hg_return_t reply_bulk_cb(const struct hg_cb_info *cbi) {
     if (oldphase == RS_READCLIENT) {
         data = *((char *)rs->lrmabuf);
         if (!g.quiet)
-            printf("%d: %d: server bulk read from client complete (data=%d)\n",
+            print2("%d: %d: server bulk read from client complete (data=%d)\n",
                    rs->isp->n, rs->in.seq & RPC_SEQMASK, data);
     } else {
         if (!g.quiet)
-            printf("%d: %d server bulk write to client complete\n",
+            print2("%d: %d server bulk write to client complete\n",
                    rs->isp->n, rs->in.seq & RPC_SEQMASK);
     }
 
