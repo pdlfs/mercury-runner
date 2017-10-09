@@ -1084,8 +1084,6 @@ int main(int argc, char **argv) {
 #ifdef MPI_RUNNER
     if (g.mpimode) {
         int myrank, mysize, newmode;
-        if (g.dir)
-            complain(1, "MPI mode currently doesn't work with -d");
         if (MPI_Init(&argc, &argv) != MPI_SUCCESS) {
             g.mpimode = 0;
             complain(1, "MPI_Init failed!");
@@ -1130,12 +1128,23 @@ int main(int argc, char **argv) {
     if (g.dir) {
         if (chdir(g.dir) < 0)
             complain(1, "can't cd to %s: %s", g.dir, strerror(errno));
-        c = strchr(g.localspec, '=');
-        if (!c)
-            complain(1, "missing '=' in localspec: %s", g.localspec);
-        g.localtag = g.localspec;
-        *c = '\0';
-        g.localspec = c + 1;
+
+        if ((c = strchr(g.localspec, '=')) != NULL) {
+            g.localtag = g.localspec;
+            *c = '\0';
+            g.localspec = c + 1;
+        } else if ((c = strchr(g.remotespec, '=')) != NULL) {
+            /*
+             * undocumented feature for MPI mode: allow the '=' on the
+             * remotespec instead of the localspec...
+             */
+            g.localtag = g.localspec;
+            *c = '\0';
+            g.localspec = c + 1;
+        } else {
+            complain(1, "missing '=' in address specs: l=%s r=%s",
+            g.localspec, g.remotespec);
+        }
     }
     snprintf(g.modestr, sizeof(g.modestr), "%s%s",
             (g.mode & MR_CLIENT) ? "c" : "", (g.mode & MR_SERVER) ? "s" : "");
