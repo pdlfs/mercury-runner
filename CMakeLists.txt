@@ -36,7 +36,10 @@ if (MPI)
 endif ()
 
 add_executable (mercury-runner mercury-runner.cc)
-target_include_directories (mercury-runner PUBLIC ${MERCURY_INCLUDE_DIR})
+if (MERCURY_INCLUDE_DIR)
+    # XXX: Oct 2017 backward compat, newer mercury doesn't do this anymore...
+    target_include_directories (mercury-runner PUBLIC ${MERCURY_INCLUDE_DIR})
+endif ()
 target_link_libraries (mercury-runner mercury Threads::Threads)
 
 #
