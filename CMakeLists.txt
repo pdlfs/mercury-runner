@@ -47,7 +47,9 @@ target_link_libraries (mercury-runner mercury Threads::Threads)
 #
 if (MPI)
   target_compile_options (mercury-runner PRIVATE -DMPI_RUNNER)
-  foreach (lcv ${MPI_CXX_COMPILE_FLAGS})
+  # Note that the mpich on ub14 gives a leading space that we need to trim off.
+  string (REPLACE " " ";" mpicxx_flags "${MPI_CXX_COMPILE_FLAGS}")
+  foreach (lcv ${mpicxx_flags})
       if (NOT ${lcv} STREQUAL "")
           target_compile_options (mercury-runner PUBLIC
                                   $<BUILD_INTERFACE:${lcv}>)
