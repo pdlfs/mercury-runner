@@ -1266,18 +1266,23 @@ int main(int argc, char **argv) {
  * will exit on failure...
  */
 void save_dir_addr(int n) {
-    const char *name;
-    hg_size_t namelen, asz, put;
-    char *tmpbuf, file[128];
+    const char *clname;
+    hg_size_t clnamelen, asz, put;
     hg_addr_t myaddr;
+    char *tmpbuf, file[128], *colon, *plus;
+    int has_classname;
     FILE *fp;
 
-    /* HG_Addr_to_string() doesn't include the protocol */
-    name = HG_Class_get_name(is[n].hgclass);
-    if (!name) complain(1, "can't get class name");
-    namelen = strlen(name);
+    /*
+     * XXX: mercury behavior has changed.  in some older versions
+     * HG_Addr_to_string() doesn't include the class name.  in newer
+     * versions it does.  we handle both cases.
+     */
+    clname = HG_Class_get_name(is[n].hgclass);
+    if (!clname) complain(1, "can't get class name");
+    clnamelen = strlen(clname);
 
-    /* get my local address, convert to string in malloc'd buf */
+    /* get localaddr size, malloc buf, then put string in malloc'd buf */
     if (HG_Addr_self(is[n].hgclass, &myaddr) != HG_SUCCESS)
         complain(1, "HG_Addr_self failed?!");
     if (HG_Addr_to_string(is[n].hgclass, NULL, &asz, myaddr) != HG_SUCCESS)
@@ -1288,20 +1293,27 @@ void save_dir_addr(int n) {
                                           &asz, myaddr) != HG_SUCCESS)
         complain(1, "addr to string failed");
 
+    /* determine if tmpbuf already has class name in it or not */
+    colon = strchr(tmpbuf, ':');
+    plus = strchr(tmpbuf, '+');
+    has_classname = (plus && (!colon || plus < colon));
+
     /* write the data to the file */
     snprintf(file, sizeof(file), "s.%s.%d", g.localtag, n);
     fp = fopen(file, "w");
     if (!fp) complain(1, "fopen failed: %s", strerror(errno));
-    if (strcmp(g.localspec, "mpi+dynamic") == 0) {
-        /* XXXCDC: why isn't this uniform? */
-        put = fprintf(fp, "%s", tmpbuf);
-        //if (put + 1 != asz)
-        //    complain(1, "fprintf failed: %d != %d", put + 1, namelen + 1 + asz);
+
+    if (has_classname) {
+        put = fprintf(fp, "%s", tmpbuf);  /* note: asz includes null */
+        if (put + 1 != asz)
+            complain(1, "fprintf failed: %d != %d", put + 1, asz);
     } else {
-        put = fprintf(fp, "%s+%s", name, tmpbuf);
-        if (put + 1 != namelen + 1 + asz)
-            complain(1, "fprintf failed: %d != %d", put + 1, namelen + 1 + asz);
+        put = fprintf(fp, "%s+%s", clname, tmpbuf);
+        if (put + 1 != clnamelen + 1 + asz)
+            complain(1, "fprintf failed: %d != %d",
+                     put + 1, clnamelen + 1 + asz);
     }
+
     if (fclose(fp) != 0)
         complain(1, "fclose failed");
 
