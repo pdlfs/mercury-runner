@@ -1133,6 +1133,10 @@ int main(int argc, char **argv) {
             g.localtag = g.localspec;
             *c = '\0';
             g.localspec = c + 1;
+            /* if both local+remote have "=spec" just discard the remote one */
+            if ((c = strchr(g.remotespec, '=')) != NULL) {
+                *c = '\0';
+            }
         } else if ((c = strchr(g.remotespec, '=')) != NULL) {
             /*
              * undocumented feature for MPI mode: allow the '=' on the
