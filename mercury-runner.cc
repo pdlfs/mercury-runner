@@ -1721,7 +1721,7 @@ static void *run_network(void *arg) {
            is[n].nprogress, is[n].ntrigger);
 #ifdef RUSAGE_THREAD
     useprobe_print(stdout, &rn, "net", n);
-    if (g.savefp) useprobe_print(g.savefp, &rn, "ret", n);
+    if (g.savefp) useprobe_print(g.savefp, &rn, "net", n);
 #endif
     return(NULL);
 }
