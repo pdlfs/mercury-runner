@@ -1235,16 +1235,19 @@ int main(int argc, char **argv) {
 
     /* fork off a thread for each instance */
     useprobe_start(&mainuse, RUSAGE_SELF);
-    for (lcv = 0 ; lcv < n ; lcv++) {
+    for (lcv = 1 ; lcv < n ; lcv++) {
         is[lcv].n = lcv;
         rv = pthread_create(&tarr[lcv], NULL, run_instance, (void*)&is[lcv]);
         if (rv != 0)
             complain(1, "pthread create failed %d", rv);
     }
 
+    /* just use main thread to run instance 0 */
+    run_instance(&is[0]);
+
     /* now wait for everything to finish */
     print2("main: collecting\n");
-    for (lcv = 0 ; lcv < n ; lcv++) {
+    for (lcv = 1 ; lcv < n ; lcv++) {
         pthread_join(tarr[lcv], NULL);
     }
     useprobe_end(&mainuse);
