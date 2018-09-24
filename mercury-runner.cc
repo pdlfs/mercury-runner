@@ -373,7 +373,7 @@ void useprobe_print(FILE *out, struct useprobe *up, const char *tag, int n) {
     char nstr[32];
     double start, end;
     double ustart, uend, sstart, send;
-    long nminflt, nmajflt, ninblock, noublock, nnvcsw, nnivcsw;
+    long nminflt, nmajflt, ninblock, noublock, nnvcsw, nnivcsw, maxrss;
 
     if (n >= 0) {
         snprintf(nstr, sizeof(nstr), "%d: ", n);
@@ -396,12 +396,14 @@ void useprobe_print(FILE *out, struct useprobe *up, const char *tag, int n) {
     noublock = up->r1.ru_oublock - up->r0.ru_oublock;
     nnvcsw = up->r1.ru_nvcsw - up->r0.ru_nvcsw;
     nnivcsw = up->r1.ru_nivcsw - up->r0.ru_nivcsw;
+    maxrss = up->r1.ru_maxrss - up->r0.ru_maxrss;
 
     fprintf(out, "%s%s: times: wall=%f, usr=%f, sys=%f (secs)\n", nstr, tag,
         end - start, uend - ustart, send - sstart);
     fprintf(out,
       "%s%s: minflt=%ld, majflt=%ld, inb=%ld, oub=%ld, vcw=%ld, ivcw=%ld\n",
       nstr, tag, nminflt, nmajflt, ninblock, noublock, nnvcsw, nnivcsw);
+    fprintf(out, "%s%s: maxrss=%ld (KiB)\n", nstr, tag, maxrss);
 }
 
 /*
