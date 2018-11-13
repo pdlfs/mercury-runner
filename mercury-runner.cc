@@ -64,8 +64,9 @@
  * options:
  *  -c count     number of RPCs to perform
  *  -d dir       shared directory to pass server address through
+ *  -g           use MPI gather to get remote addr (MPI only, ninst 1 only)
  *  -l limit     limit # of concurrent client RPC requests ("-l 1" = serial)
- *  -M           run mercury-runner under mpirun (MPI mode)
+ *  -M           run mercury-runner under mpi (MPI mode)
  *  -m mode      c, s, cs (client, server, or both)
  *  -p baseport  base port number
  *  -q           quiet mode - don't print during RPCs
@@ -153,6 +154,18 @@
  * value.  also, you must specify both remote and local specs when
  * using MPI mode (even for "-m s").
  *
+ * for transports that do not allow you to specify a listening port
+ * at HG_Init() time (e.g. MPI, newer version of ofi+gni), we need
+ * to get the actual address used using HG_Addr_self() and exchange
+ * that through some out of band mechanism in order for clients to
+ * have the full address to connect to.  there are two options:
+ *   1. use a network file system directory to exchange this information
+ *      with the "-d dir" flag
+ *   2. if using MPI mode (-M) use the "-g" flag to use MPI gather ops
+ *      to exchange address strings between endpoints.  NOTE: this
+ *      option is only available when there is one instance of
+ *      mercury per-proc (ninst == 1).   use "-d" if ninst is > 1.
+ *
  * note that for MP mode, if "-s" is used to save output a ".N" is
  * appended to the filename (where N is either 0 or 1 based on the rank).
  */
@@ -207,6 +220,7 @@ struct g {
     int count;               /* number of msgs to send/recv in a run */
     char *dir;               /* shared directory (mainly for mpi) */
     int mpimode;             /* running under mpirun */
+    int mpixgather;          /* use MPI gather to xchg addresses (ninst==1) */
     int mode;                /* operation mode (MR_CLIENT, etc.) */
     char modestr[4];         /* mode string */
     int limit;               /* limit # of concurrent RPCs at client */
@@ -912,6 +926,11 @@ static void usage(const char *msg) {
     fprintf(stderr, "\noptions:\n");
     fprintf(stderr, "\t-c count    number of RPCs to perform\n");
     fprintf(stderr, "\t-d dir      shared dir for passing server addresses\n");
+#ifdef MPI_RUNNER
+    fprintf(stderr, "\t-g          MPI gather for remote addr (ninst==1)\n");
+#else
+    fprintf(stderr, "\t-g          (MPI mode not compiled in)\n");
+#endif
     fprintf(stderr, "\t-l limit    limit # of client concurrent RPCs\n");
 #ifdef MPI_RUNNER
     fprintf(stderr, "\t-M          run mercury-runner under MPI (MPI mode)\n");
@@ -988,7 +1007,7 @@ int main(int argc, char **argv) {
     g.timeout = DEF_TIMEOUT;
 
     while ((ch = getopt(argc, argv,
-                        "c:d:i:l:Mm:o:p:qr:t:L:OR:S:s:X:Y:")) != -1) {
+                        "c:d:gi:l:Mm:o:p:qr:t:L:OR:S:s:X:Y:")) != -1) {
         switch (ch) {
             case 'c':
                 g.count = atoi(optarg);
@@ -996,6 +1015,13 @@ int main(int argc, char **argv) {
                 break;
             case 'd':
                 g.dir = optarg;
+                break;
+            case 'g':
+#ifdef MPI_RUNNER
+                g.mpixgather = 1;
+#else
+                complain(1, "not compiled with MPI, can't -g");
+#endif
                 break;
             case 'i':
                 g.inreqsz = getsize(optarg);
@@ -1082,6 +1108,17 @@ int main(int argc, char **argv) {
     g.ninst = n = atoi(argv[0]);
     g.localspec = argv[1];
     g.remotespec = (argc == 3) ? argv[2] : NULL;
+
+    if (g.mpixgather) {
+        if (g.mpimode == 0)
+            complain(1, "MPI gather mode (-g) requires MPI mode (-M)");
+        if (g.ninst > 1)
+            complain(1, "ninst must be 1 to use MPI gather mode (-g)");
+        if (g.dir) {
+            complain(0, "note: '-d dir' when -g is used with MPI");
+            g.dir = NULL;    /* switch it off and keep going */
+        }
+    }
 
 #ifdef MPI_RUNNER
     if (g.mpimode) {
@@ -1186,6 +1223,8 @@ int main(int argc, char **argv) {
     print2("\n%s options:\n", argv0);
     print2("\tninstances = %d\n", n);
     print2("\tmpimode    = %s\n", (g.mpimode) ? "ON" : "OFF");
+    if (g.mpimode)
+        print2("\tmpigather  = %s\n", (g.mpixgather) ? "ON" : "OFF");
     print2("\tlocalspec  = %s\n", g.localspec);
     if (g.localtag)
         print2("\tlocaltag   = %s\n", g.localtag);
@@ -1268,6 +1307,69 @@ int main(int argc, char **argv) {
         g.savefp = NULL;
     }
     exit(0);
+}
+
+/*
+ * gather_remote_url: use MPI to gather the remote URL so we can pass
+ * it down to HG_Addr_lookup().  only used in MPI mode when ninst==1
+ * and the "-g" flag is set.  (the ninst limitation is because we don't
+ * want to deal with multi-threaded apps calling down into MPI.)
+ * so "n" is always 1.
+ * note: MPI_Comm_size is 2 (we already checked).
+ *
+ * on success we return a malloc'd string with the remote address in it.
+ * the caller must free the buffer when done with it.
+ */
+char *gather_remote_url(int n) {
+#ifndef MPI_RUNNER
+    return(NULL);    /* nothing-doing if we don't have MPI */
+#else
+    /* recreate a cut down version of mssg here ... */
+    int myrank, mysize, maxsize;
+    hg_addr_t myaddr;
+    hg_size_t asz;
+    char *urlbuf, *myname, *rv;
+
+    /* recover rank from mpi mode value */
+    myrank = g.mpimode - 1;
+
+    /* get our address string size */
+    if (HG_Addr_self(is[n].hgclass, &myaddr) != HG_SUCCESS)
+        complain(1, "HG_Addr_self failed?!");
+    asz = 0;
+    if (HG_Addr_to_string(is[n].hgclass, NULL, &asz, myaddr) != HG_SUCCESS)
+        complain(1, "addr to string failed to give needed size");
+
+    /* exchange sizes, choose max value */
+    mysize = asz;
+    if (MPI_Allreduce(&mysize, &maxsize, 1, MPI_INT,
+                      MPI_MAX, MPI_COMM_WORLD) != MPI_SUCCESS)
+        complain(1, "MPI_Allreduce failed?");
+
+    /* allocate buffer and load our address into the correct slot */
+    urlbuf = (char *) malloc(maxsize * 2);
+    if (!urlbuf)
+        complain(1, "malloc failed!");
+    myname = urlbuf + (maxsize * myrank);
+    asz = maxsize;
+    if (HG_Addr_to_string(is[n].hgclass, myname, &asz, myaddr) != HG_SUCCESS)
+        complain(1, "addr to string failed");
+    /* don't need myaddr anymore */
+    if (HG_Addr_free(is[n].hgclass, myaddr) != HG_SUCCESS)
+        complain(0, "warning: HG_Addr_free failed");
+
+    /* exchange the address URLs now */
+    if (MPI_Allgather(MPI_IN_PLACE, maxsize, MPI_BYTE,
+                      urlbuf, maxsize, MPI_BYTE,
+                      MPI_COMM_WORLD) != MPI_SUCCESS)
+        complain(1, "allgather failed!?");
+
+    /* rank 0 wants rank 1's address and vice-versa */
+    rv = strdup( (myrank == 0) ? (urlbuf + maxsize) : urlbuf);
+    free(urlbuf);
+
+    return(rv);
+#endif
 }
 
 /*
@@ -1378,7 +1480,7 @@ void *run_instance(void *arg) {
     struct is *isp = (struct is *)arg;
     int n = isp->n;               /* recover n from isp */
     int lcv, rv;
-    char *remoteurl;
+    char *remoteurl = NULL;
     hg_return_t ret;
     struct lookup_state lst;
     hg_op_id_t lookupop;
@@ -1426,6 +1528,14 @@ void *run_instance(void *arg) {
     rv = pthread_create(&is[n].nthread, NULL, run_network, (void*)&n);
     if (rv != 0) complain(1, "pthread create srvr failed %d", rv);
 
+    /* MPI gather the remoteurl, if requested */
+    if (g.mpixgather) {
+        remoteurl = gather_remote_url(n);
+        if (!remoteurl)
+            complain(1, "MPI gather of remote URL failed!");
+        print2("%d: collected remote URL via MPI gather\n", n);
+    }
+
     /* servers handle the g.dir option by writing our addr to a file */
     if (g.dir != NULL && (g.mode & MR_SERVER) != 0) {
         save_dir_addr(n);
@@ -1442,7 +1552,9 @@ void *run_instance(void *arg) {
      * once, since it is fixed for this program...
      */
     if (g.mode & MR_CLIENT) {
-        remoteurl = (g.dir) ? load_dir_addr(n) : is[n].remoteid;
+        if (remoteurl == NULL) {  /* MPI gather may have set it already */
+            remoteurl = (g.dir) ? load_dir_addr(n) : is[n].remoteid;
+        }
         print2("%d: remote address lookup %s\n", n, remoteurl);
         if (pthread_mutex_init(&lst.lock, NULL) != 0)
             complain(1, "lst.lock mutex init");
