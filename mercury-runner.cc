@@ -64,7 +64,7 @@
  * options:
  *  -c count     number of RPCs to perform
  *  -d dir       shared directory to pass server address through
- *  -g           use MPI gather to get remote addr (MPI only, ninst 1 only)
+ *  -g           use MPI gather to get remote addr (MPI only)
  *  -l limit     limit # of concurrent client RPC requests ("-l 1" = serial)
  *  -M           run mercury-runner under mpi (MPI mode)
  *  -m mode      c, s, cs (client, server, or both)
@@ -162,9 +162,7 @@
  *   1. use a network file system directory to exchange this information
  *      with the "-d dir" flag
  *   2. if using MPI mode (-M) use the "-g" flag to use MPI gather ops
- *      to exchange address strings between endpoints.  NOTE: this
- *      option is only available when there is one instance of
- *      mercury per-proc (ninst == 1).   use "-d" if ninst is > 1.
+ *      to exchange address strings between endpoints.
  *
  * note that for MP mode, if "-s" is used to save output a ".N" is
  * appended to the filename (where N is either 0 or 1 based on the rank).
@@ -208,6 +206,10 @@
 struct callstate;          /* forward decl. for free list in struct is */
 struct respstate;
 
+#ifdef MPI_RUNNER
+struct gatherstate;        /* state for gather_remote_url() */
+#endif
+
 /*
  * g: shared global data (e.g. from the command line)
  */
@@ -220,7 +222,10 @@ struct g {
     int count;               /* number of msgs to send/recv in a run */
     char *dir;               /* shared directory (mainly for mpi) */
     int mpimode;             /* running under mpirun */
-    int mpixgather;          /* use MPI gather to xchg addresses (ninst==1) */
+    int mpixgather;          /* use MPI gather to xchg addresses */
+#ifdef MPI_RUNNER
+    struct gatherstate *gs;  /* state for gather_remote_url() */
+#endif
     int mode;                /* operation mode (MR_CLIENT, etc.) */
     char modestr[4];         /* mode string */
     int limit;               /* limit # of concurrent RPCs at client */
@@ -444,6 +449,177 @@ int64_t getsize(char *from) {
 
     return(rv);
 }
+
+#ifdef MPI_RUNNER  /* tbar: only used by gather_remote_url() */
+/*
+ * tbar: thread barrier.  we've got N threads (where N > 0) in a process
+ * that need to sync up.  we number the threads 0 to N-1 and choose thread
+ * 0 ("t0") to do setup and manage communications with the other threads
+ * (if N >= 2).
+ *
+ * example usage of API:
+ *
+ *   struct tbar tb;
+ *
+ *   rv = tbar_init(&tb, N);     // init tb before any thread accesses it
+ *
+ *   if (tbar_bar(&tb, tn) < 0)  // all threads block here, except t0
+ *     exit(1);                  // fatal error
+ *
+ *   if (tn == 0) {              // t0 can do setup, then release the others
+ *     do_some_setup();
+ *     tbar_unbar(&tb, tn);      // release/unblock threads 1 to N-1
+ *   }
+ */
+
+/*
+ * tbar: thread barrier state structure
+ */
+struct tbar {
+    pthread_mutex_t tlck;       /* lock for this data structure */
+    int N;                      /* number of threads (incl t0) */
+    pthread_cond_t t0cv;        /* control cv (thread t0 block here) */
+    int t0_waiting;             /* is t0 waiting on t0cv? */
+    int t0_draining;            /* is t0 in draining state? */
+    pthread_cond_t tbarcv;      /* barrier cv (threads 1 to N-1 block here) */
+    int nwaiters;               /* number of threads waiting on tbarcv */
+    int toget;                  /* remaining # of threads to sync with */
+};
+
+/*
+ * tbar_init: init a tbar into a known state.  must be called before
+ * any thread attempts to tbar_bar() or tbar_unbar() on it.  returns
+ * -1 on error, 0 otherwise.
+ */
+int tbar_init(struct tbar *tb, int nthreads) {
+
+    if (pthread_mutex_init(&tb->tlck, NULL) != 0)
+        return(-1);
+    if (pthread_cond_init(&tb->t0cv, NULL) != 0) {
+        pthread_mutex_destroy(&tb->tlck);
+        return(-1);
+    }
+    if (pthread_cond_init(&tb->tbarcv, NULL) != 0) {
+        pthread_cond_destroy(&tb->t0cv);
+        pthread_mutex_destroy(&tb->tlck);
+        return(-1);
+    }
+
+    tb->N = nthreads;
+    tb->t0_waiting = 0;
+    tb->t0_draining = 0;
+    tb->nwaiters = 0;
+    tb->toget = nthreads;
+    return(0);
+}
+
+/*
+ * tbar_bar: enter a thread barrier.  for t0, we always return without
+ * blocking.   all other threads block here in tbar_bar() until t0
+ * releases us by calling tbar_unbar().   if a thread that has been
+ * released starts the next operation (by calling us), it blocks until
+ * the previous operation clears.
+ */
+int tbar_bar(struct tbar *tb, int tn) {
+    pthread_mutex_lock(&tb->tlck);
+
+    if (tn >= tb->N) {
+        fprintf(stderr, "tbar_bar: size error %d >= %d\n", tn, tb->N);
+        abort();
+    }
+
+    /* not t0 and need to wait for prev. op to finish draining? */
+    if (tn) {
+        while (tb->t0_draining) {
+            tb->nwaiters++;
+            pthread_cond_wait(&tb->tbarcv, &tb->tlck);
+            tb->nwaiters--;
+        }
+    }
+
+    /* t0_draining must be zero now */
+    if (tb->t0_draining) {
+        fprintf(stderr, "tbar_bar: draining error\n");
+        abort();
+    }
+
+    if (tb->toget > 0)     /* drop toget */
+        tb->toget--;
+
+    if (tn) {              /* t0 skips this, since it never blocks */
+
+        /* last collected thread?  wake t0 if it is blocked */
+        if (tb->toget == 0 && tb->t0_waiting) {
+            pthread_cond_broadcast(&tb->t0cv);
+        }
+
+        /* wait for t0 to release us */
+        while (tb->t0_draining == 0) {
+            tb->nwaiters++;
+            pthread_cond_wait(&tb->tbarcv, &tb->tlck);
+            tb->nwaiters--;
+        }
+
+        /* now we are in draining state */
+        if (tb->toget > 0)
+            tb->toget--;
+        if (tb->toget == 0 && tb->t0_waiting) {
+            pthread_cond_broadcast(&tb->t0cv);
+        }
+    }
+
+    pthread_mutex_unlock(&tb->tlck);
+    return(0);
+}
+
+/*
+ * tbar_unbar: called by t0 when it is ready to release the other threads
+ * and drain the tbar.  returns 0 when tbar is completely drainted.
+ * return -1 on error.
+ */
+int tbar_unbar(struct tbar *tb, int tn) {
+    if (tn)
+        return(-1);   /* ERROR, only t0 can call this function */
+
+    pthread_mutex_lock(&tb->tlck);
+    /* t0_draining must be 0 since we are t0 and we only set it here */
+
+    /* wait for all procs to hit the bar */
+    while (tb->toget > 0) {
+        tb->t0_waiting = 1;
+        pthread_cond_wait(&tb->t0cv, &tb->tlck);
+        tb->t0_waiting = 0;
+    }
+
+    /* enter draining state */
+    tb->t0_draining = 1;
+    tb->toget = tb->N - 1;      /* no need to drain t0, subtract it out now */
+
+    /* wake up procs waiting to be drained, if any */
+    if (tb->nwaiters > 0) {
+        pthread_cond_broadcast(&tb->tbarcv);
+    }
+
+    /* wait for drain to complete */
+    while (tb->toget > 0) {
+        tb->t0_waiting = 1;
+        pthread_cond_wait(&tb->t0cv, &tb->tlck);
+        tb->t0_waiting = 0;
+    }
+
+    /* exit draining state back to collection */
+    tb->t0_draining = 0;
+    tb->toget = tb->N;
+    if (tb->nwaiters > 0) {   /* look for threads waiting to start next op */
+        pthread_cond_broadcast(&tb->tbarcv);
+    }
+
+    pthread_mutex_unlock(&tb->tlck);
+    return(0);
+}
+
+/* end of tbar */
+#endif
 
 /*
  * end of helper/utility functions.
@@ -927,7 +1103,7 @@ static void usage(const char *msg) {
     fprintf(stderr, "\t-c count    number of RPCs to perform\n");
     fprintf(stderr, "\t-d dir      shared dir for passing server addresses\n");
 #ifdef MPI_RUNNER
-    fprintf(stderr, "\t-g          MPI gather for remote addr (ninst==1)\n");
+    fprintf(stderr, "\t-g          MPI gather for remote addr\n");
 #else
     fprintf(stderr, "\t-g          (MPI mode not compiled in)\n");
 #endif
@@ -973,6 +1149,17 @@ static void usage(const char *msg) {
     exit(1);
 }
 
+#ifdef MPI_RUNNER
+/*
+ * gather state: state for gather_remote_url() operation
+ */
+struct gatherstate {
+    struct tbar tb;         /* thread barrier */
+    /* let's just reuse tb.tlck to lock these too */
+    int maxsize;            /* max URL size in bytes */
+    char *urlbuf;           /* malloc'd buffer for MPI_Allgather() */
+};
+#endif
 
 /*
  * main program.  usage:
@@ -989,6 +1176,9 @@ int main(int argc, char **argv) {
     struct useprobe mainuse;
     char mytag[128];
     char *savefile;
+#ifdef MPI_RUNNER
+    struct gatherstate gstatestore;
+#endif
     argv0 = argv[0];
 
     /* we want lines, even if we are writing to a pipe */
@@ -1109,18 +1299,23 @@ int main(int argc, char **argv) {
     g.localspec = argv[1];
     g.remotespec = (argc == 3) ? argv[2] : NULL;
 
+#ifdef MPI_RUNNER
     if (g.mpixgather) {
         if (g.mpimode == 0)
             complain(1, "MPI gather mode (-g) requires MPI mode (-M)");
-        if (g.ninst > 1)
-            complain(1, "ninst must be 1 to use MPI gather mode (-g)");
         if (g.dir) {
             complain(0, "note: '-d dir' when -g is used with MPI");
             g.dir = NULL;    /* switch it off and keep going */
         }
+
+        /* setup gatherstate structure before creating any threads */
+        if (tbar_init(&gstatestore.tb, g.ninst) < 0)
+            complain(1, "unable to init gstatestore.tb?");
+        gstatestore.maxsize = 0;
+        gstatestore.urlbuf = NULL;
+        g.gs = &gstatestore;
     }
 
-#ifdef MPI_RUNNER
     if (g.mpimode) {
         int myrank, mysize, newmode;
         if (MPI_Init(&argc, &argv) != MPI_SUCCESS) {
@@ -1311,10 +1506,8 @@ int main(int argc, char **argv) {
 
 /*
  * gather_remote_url: use MPI to gather the remote URL so we can pass
- * it down to HG_Addr_lookup().  only used in MPI mode when ninst==1
- * and the "-g" flag is set.  (the ninst limitation is because we don't
- * want to deal with multi-threaded apps calling down into MPI.)
- * so "n" is always 1.
+ * it down to HG_Addr_lookup().  only used in MPI mode when the "-g" flag
+ * is set.
  * note: MPI_Comm_size is 2 (we already checked).
  *
  * on success we return a malloc'd string with the remote address in it.
@@ -1324,11 +1517,15 @@ char *gather_remote_url(int n) {
 #ifndef MPI_RUNNER
     return(NULL);    /* nothing-doing if we don't have MPI */
 #else
-    /* recreate a cut down version of mssg here ... */
-    int myrank, mysize, maxsize;
+    /*
+     * we exchange local info using tbar, and then we recreate a
+     * cut down version of mssg here to use MPI to exchange info
+     * between processes...
+     */
+    int myrank, tmpmax;
     hg_addr_t myaddr;
     hg_size_t asz;
-    char *urlbuf, *myname, *rv;
+    char *myname, *rv;
 
     /* recover rank from mpi mode value */
     myrank = g.mpimode - 1;
@@ -1340,33 +1537,77 @@ char *gather_remote_url(int n) {
     if (HG_Addr_to_string(is[n].hgclass, NULL, &asz, myaddr) != HG_SUCCESS)
         complain(1, "addr to string failed to give needed size");
 
-    /* exchange sizes, choose max value */
-    mysize = asz;
-    if (MPI_Allreduce(&mysize, &maxsize, 1, MPI_INT,
-                      MPI_MAX, MPI_COMM_WORLD) != MPI_SUCCESS)
-        complain(1, "MPI_Allreduce failed?");
+    pthread_mutex_lock(&g.gs->tb.tlck);
+    if (asz > g.gs->maxsize)
+        g.gs->maxsize = asz;
+    pthread_mutex_unlock(&g.gs->tb.tlck);
 
-    /* allocate buffer and load our address into the correct slot */
-    urlbuf = (char *) malloc(maxsize * 2);
-    if (!urlbuf)
-        complain(1, "malloc failed!");
-    myname = urlbuf + (maxsize * myrank);
-    asz = maxsize;
+    /* sync up threads to collect max value across them */
+    if (tbar_bar(&g.gs->tb, n) < 0)
+        complain(1, "gather: tbar_bar 1 failed");
+
+    /* now t0 uses MPI to chose max value between processes */
+    if (n == 0) {
+        if (MPI_Allreduce(&g.gs->maxsize, &tmpmax, 1, MPI_INT,
+                          MPI_MAX, MPI_COMM_WORLD) != MPI_SUCCESS)
+            complain(1, "MPI_Allreduce failed?");
+        g.gs->maxsize = tmpmax;  /* no need to lock, as we are in tbar */
+        /* we need 1 buffer per thread for 2 MPI procs */
+        g.gs->urlbuf = (char *)malloc(g.gs->maxsize * g.ninst * 2);
+        if (!g.gs->urlbuf)
+            complain(1, "g.gs->urlbuf malloc failed!");
+
+        /* now that the urlbuf is in place, release the threads */
+        tbar_unbar(&g.gs->tb, n);
+    }
+
+    /*
+     * figure out where to put this thread's info.  we put all of MPI
+     * rank 0's threads first, then MPI rank 1's.  within a rank, the
+     * strings are in instance order.
+     */
+    myname = g.gs->urlbuf + (g.gs->maxsize * g.ninst * myrank) +
+                            (g.gs->maxsize * n);
+    asz = g.gs->maxsize;
     if (HG_Addr_to_string(is[n].hgclass, myname, &asz, myaddr) != HG_SUCCESS)
         complain(1, "addr to string failed");
     /* don't need myaddr anymore */
     if (HG_Addr_free(is[n].hgclass, myaddr) != HG_SUCCESS)
         complain(0, "warning: HG_Addr_free failed");
 
-    /* exchange the address URLs now */
-    if (MPI_Allgather(MPI_IN_PLACE, maxsize, MPI_BYTE,
-                      urlbuf, maxsize, MPI_BYTE,
-                      MPI_COMM_WORLD) != MPI_SUCCESS)
-        complain(1, "allgather failed!?");
+    /* sync up threads again so that the two t0's can exchange all addr strs */
+    if (tbar_bar(&g.gs->tb, n) < 0)
+        complain(1, "gather: tbar_bar 2 failed");
 
-    /* rank 0 wants rank 1's address and vice-versa */
-    rv = strdup( (myrank == 0) ? (urlbuf + maxsize) : urlbuf);
-    free(urlbuf);
+    /* now t0 can do the MPI operation to exchange address URLs now */
+    if (n == 0) {
+        if (MPI_Allgather(MPI_IN_PLACE, g.gs->maxsize * g.ninst, MPI_BYTE,
+                          g.gs->urlbuf, g.gs->maxsize * g.ninst, MPI_BYTE,
+                          MPI_COMM_WORLD) != MPI_SUCCESS)
+            complain(1, "allgather failed!?");
+
+        /* now that the urlbuf is gathered, release the threads */
+        tbar_unbar(&g.gs->tb, n);
+    }
+
+    rv = g.gs->urlbuf;
+    if (myrank == 0)
+        rv = rv + (g.gs->maxsize * g.ninst);  /* rank 0 wants rank 1's addrs */
+    rv = rv + (g.gs->maxsize * n);            /* select correct instance */
+    rv = strdup(rv);                          /* and make a copy */
+    if (!rv) complain(1, "strdup failed?");
+
+    /* sync up threads one last time so we can free g.gs->urlbuf */
+    if (tbar_bar(&g.gs->tb, n) < 0)
+        complain(1, "gather: tbar_bar 3 failed");
+
+    if (n == 0) {
+        free(g.gs->urlbuf);
+        g.gs->urlbuf = NULL;
+
+        /* now that the urlbuf is freed, release the threads */
+        tbar_unbar(&g.gs->tb, n);
+    }
 
     return(rv);
 #endif
