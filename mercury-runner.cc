@@ -68,6 +68,7 @@
  *  -l limit     limit # of concurrent client RPC requests ("-l 1" = serial)
  *  -M           run mercury-runner under mpi (MPI mode)
  *  -m mode      c, s, cs (client, server, or both)
+ *  -P           poll mode (NA_NO_BLOCK)
  *  -p baseport  base port number
  *  -q           quiet mode - don't print during RPCs
  *  -r n         enable tag suffix with this run number
@@ -219,6 +220,9 @@ struct g {
     char *localtag;          /* if using "-d" - the local tag */
     char *remotespec;        /* remote address spec */
     int baseport;            /* base port number */
+#if (HG_VERSION_MAJOR >= 1)  /* some overshoot, some ver 0's had it too */
+    struct hg_init_info initinfo;   /* for HG_Init_opt() to set progress mode */
+#endif
     int count;               /* number of msgs to send/recv in a run */
     char *dir;               /* shared directory (mainly for mpi) */
     int mpimode;             /* running under mpirun */
@@ -1114,6 +1118,11 @@ static void usage(const char *msg) {
     fprintf(stderr, "\t-M          (MPI mode not compiled in)\n");
 #endif
     fprintf(stderr, "\t-m mode     mode c, s, or cs (client/server)\n");
+#if (HG_VERSION_MAJOR >= 1)  /* some overshoot, some ver 0's had it too */
+    fprintf(stderr, "\t-P          poll mode (NA_NO_BLOCK) -- forces spin\n");
+#else
+    fprintf(stderr, "\t-P          poll mode (not supported)\n");
+#endif
     fprintf(stderr, "\t-p port     base port number\n");
     fprintf(stderr, "\t-q          quiet mode\n");
     fprintf(stderr, "\t-r n        enable tag suffix with this run number\n");
@@ -1241,6 +1250,13 @@ int main(int argc, char **argv) {
             case 'o':
                 g.outreqsz = getsize(optarg);
                 if (g.outreqsz < 8) usage("bad outreqsz");
+                break;
+            case 'P':
+#if (HG_VERSION_MAJOR >= 1)
+                g.initinfo.na_init_info.progress_mode = NA_NO_BLOCK;
+#else
+                usage("poll mode not supported in this version of mercury");
+#endif
                 break;
             case 'p':
                 g.baseport = atoi(optarg);
@@ -1426,6 +1442,10 @@ int main(int argc, char **argv) {
     print2("\tremotespec = %s\n", (g.remotespec) ? g.remotespec : "<none>");
     if (g.dir)
         print2("\tdirectory  = %s\n", g.dir);
+#if (HG_VERSION_MAJOR >= 1)
+    print2("\tpoll       = %s\n",
+        (g.initinfo.na_init_info.progress_mode) ? "ON" : "OFF");
+#endif
     print2("\tbaseport   = %d\n", g.baseport);
     print2("\tcount      = %d\n", g.count);
     print2("\tmode       = %s\n", g.modestr);
@@ -1748,8 +1768,14 @@ void *run_instance(void *arg) {
                  n + g.baseport);
 
     print2("%d: init local endpoint: %s\n", n, is[n].myid);
+#if (HG_VERSION_MAJOR >= 1)
+    is[n].hgclass = HG_Init_opt(is[n].myid,
+                                ((g.mode == MR_CLIENT) ? HG_FALSE : HG_TRUE),
+                                &g.initinfo);
+#else
     is[n].hgclass = HG_Init(is[n].myid,
                             (g.mode == MR_CLIENT) ? HG_FALSE : HG_TRUE);
+#endif
     if (is[n].hgclass == NULL)  complain(1, "HG_init failed");
     is[n].hgctx = HG_Context_create(is[n].hgclass);
     if (is[n].hgctx == NULL)  complain(1, "HG_Context_create failed");
