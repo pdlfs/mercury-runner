@@ -1206,7 +1206,7 @@ int main(int argc, char **argv) {
     g.timeout = DEF_TIMEOUT;
 
     while ((ch = getopt(argc, argv,
-                        "c:d:gi:l:Mm:o:p:qr:t:L:OR:S:s:X:Y:")) != -1) {
+                        "c:d:gi:l:Mm:o:Pp:qr:t:L:OR:S:s:X:Y:")) != -1) {
         switch (ch) {
             case 'c':
                 g.count = atoi(optarg);
