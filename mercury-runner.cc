@@ -63,6 +63,7 @@
  *
  * options:
  *  -c count     number of RPCs to perform
+ *  -D count     client prints status every "count" RPCs
  *  -d dir       shared directory to pass server address through
  *  -g           use MPI gather to get remote addr (MPI only)
  *  -l limit     limit # of concurrent client RPC requests ("-l 1" = serial)
@@ -223,6 +224,7 @@ struct g_s {
 #if (HG_VERSION_MAJOR >= 1)  /* some overshoot, some ver 0's had it too */
     struct hg_init_info initinfo;   /* for HG_Init_opt() to set progress mode */
 #endif
+    int clistat;             /* client prints status every "clistat" RPCs */
     int count;               /* number of msgs to send/recv in a run */
     char *dir;               /* shared directory (mainly for mpi) */
     int mpimode;             /* running under mpirun */
@@ -1105,6 +1107,7 @@ static void usage(const char *msg) {
     fprintf(stderr, "remotespec is optional if mode is set to 's' (server)\n");
     fprintf(stderr, "\noptions:\n");
     fprintf(stderr, "\t-c count    number of RPCs to perform\n");
+    fprintf(stderr, "\t-D count    client prints status every 'count' RPCs\n");
     fprintf(stderr, "\t-d dir      shared dir for passing server addresses\n");
 #ifdef MPI_RUNNER
     fprintf(stderr, "\t-g          MPI gather for remote addr\n");
@@ -1206,11 +1209,15 @@ int main(int argc, char **argv) {
     g.timeout = DEF_TIMEOUT;
 
     while ((ch = getopt(argc, argv,
-                        "c:d:gi:l:Mm:o:Pp:qr:t:L:OR:S:s:X:Y:")) != -1) {
+                        "c:D:d:gi:l:Mm:o:Pp:qr:t:L:OR:S:s:X:Y:")) != -1) {
         switch (ch) {
             case 'c':
                 g.count = atoi(optarg);
                 if (g.count < 1) usage("bad count");
+                break;
+            case 'D':
+                g.clistat = atoi(optarg);
+                if (g.clistat < 0) usage("bad client status count");
                 break;
             case 'd':
                 g.dir = optarg;
@@ -1889,6 +1896,11 @@ void *run_instance(void *arg) {
         if (ret != HG_SUCCESS) complain(1, "hg forward failed");
         if (!g.quiet)
             print2("%d: launched %d (size=%d)\n", n, lcv, (int)cs->in.sersize);
+        if (g.clistat && (is[n].nstarted % g.clistat) == 0) {
+            useprobe_end(&rp);   /* not really the end... */
+            print2("%d: RPC %d @ %d secs\n", n, is[n].nstarted,
+                   rp.t1.tv_sec - rp.t0.tv_sec);
+        }
 
         /* flow control */
         pthread_mutex_lock(&is[n].slock);
