@@ -212,9 +212,9 @@ struct gatherstate;        /* state for gather_remote_url() */
 #endif
 
 /*
- * g: shared global data (e.g. from the command line)
+ * g_s: shared global data (e.g. from the command line)
  */
-struct g {
+struct g_s {
     int ninst;               /* number of instances */
     char *localspec;         /* local address spec */
     char *localtag;          /* if using "-d" - the local tag */
@@ -264,10 +264,10 @@ struct g {
 } g;
 
 /*
- * is: per-instance state structure.   we malloc an array of these at
+ * is_s: per-instance state structure.   we malloc an array of these at
  * startup.
  */
-struct is {
+struct is_s {
     int n;                   /* our instance number (0 .. n-1) */
     hg_class_t *hgclass;     /* class for this instance */
     hg_context_t *hgctx;     /* context for this instance */
@@ -299,7 +299,7 @@ struct is {
     /* no mutex since only the main thread can write it */
     int sends_done;          /* set to non-zero when nsent is done */
 };
-struct is *is;    /* an array of state */
+struct is_s *is;    /* an array of state */
 
 /*
  * helper/utility functions, included inline here so we are self-contained
@@ -818,7 +818,7 @@ static hg_return_t hg_proc_rpcout_t(hg_proc_t proc, void *data) {
  * in one structure.
  */
 struct callstate {
-    struct is *isp;         /* instance that owns this call */
+    struct is_s *isp;       /* instance that owns this call */
     hg_handle_t callhand;   /* main handle for the call */
     rpcin_t in;             /* call args */
     /* rd_rmabuf == wr_rmabuf if -O flag (one buffer flag) */
@@ -831,7 +831,7 @@ struct callstate {
  * respstate: state of an RPC response.
  */
 struct respstate {
-    struct is *isp;         /* instance that owns this call */
+    struct is_s *isp;       /* instance that owns this call */
     hg_handle_t callhand;   /* main handle for the call */
     rpcin_t in;             /* call in args */
     rpcout_t out;           /* resp args */
@@ -849,7 +849,7 @@ struct respstate {
  * then allocate a new one if the free list is empty... we grab slock
  * to access the list.
  */
-struct callstate *get_callstate(struct is *isp) {
+struct callstate *get_callstate(struct is_s *isp) {
     struct callstate *rv;
     int64_t want;
     hg_size_t bs;
@@ -976,7 +976,7 @@ void free_callstate(struct callstate *cs) {
  * required because all work is done in the network thread and there
  * is currently only one of those.
  */
-struct respstate *get_respstate(struct is *isp) {
+struct respstate *get_respstate(struct is_s *isp) {
     struct respstate *rv;
     hg_size_t lrmasz;
 
@@ -1485,7 +1485,7 @@ int main(int argc, char **argv) {
     print2("main: starting %d instance%s ...\n", n, (n == 1) ? "" : "s");
     tarr = (pthread_t *)malloc(n * sizeof(pthread_t));
     if (!tarr) complain(1, "malloc tarr thread array failed");
-    is = (struct is *)malloc(n *sizeof(*is));    /* array */
+    is = (struct is_s *)malloc(n *sizeof(*is));    /* array */
     if (!is) complain(1, "malloc 'is' instance state failed");
     memset(is, 0, n * sizeof(*is));
 
@@ -1738,7 +1738,7 @@ static void clean_dir_addrs() {
  * we pass the instance state struct in as the arg...
  */
 void *run_instance(void *arg) {
-    struct is *isp = (struct is *)arg;
+    struct is_s *isp = (struct is_s *)arg;
     int n = isp->n;               /* recover n from isp */
     int lcv, rv;
     char *remoteurl = NULL;
@@ -1990,7 +1990,7 @@ static hg_return_t lookup_cb(const struct hg_cb_info *cbi) {
 static hg_return_t forw_cb(const struct hg_cb_info *cbi) {
     struct callstate *cs = (struct callstate *)cbi->arg;
     hg_handle_t hand;
-    struct is *isp;
+    struct is_s *isp;
     hg_return_t ret;
     rpcout_t out;
     int oldmode;
@@ -2118,7 +2118,7 @@ static void *run_network(void *arg) {
  * rpchandler: called on the server when a new RPC comes in
  */
 static hg_return_t rpchandler(hg_handle_t handle) {
-    struct is *isp;
+    struct is_s *isp;
     const struct hg_info *hgi;
     struct respstate *rs;
     hg_return_t ret;
@@ -2127,7 +2127,7 @@ static hg_return_t rpchandler(hg_handle_t handle) {
     /* gotta extract "isp" using handle, 'cause that's the only way pass it */
     hgi = HG_Get_info(handle);
     if (!hgi) complain(1, "rpchandler: bad hgi");
-    isp = (struct is *) HG_Registered_data(hgi->hg_class, hgi->id);
+    isp = (struct is_s *) HG_Registered_data(hgi->hg_class, hgi->id);
     if (!isp) complain(1, "rpchandler: bad isp");
 
     /* currently safe: only one network thread and we are in it */
@@ -2252,7 +2252,7 @@ static hg_return_t advance_resp_phase(struct respstate *rs) {
  */
 static hg_return_t reply_bulk_cb(const struct hg_cb_info *cbi) {
     struct respstate *rs;
-    struct is *isp;
+    struct is_s *isp;
     int oldphase;
     unsigned char data;
 
@@ -2283,7 +2283,7 @@ static hg_return_t reply_bulk_cb(const struct hg_cb_info *cbi) {
  */
 static hg_return_t reply_sent_cb(const struct hg_cb_info *cbi) {
     struct respstate *rs;
-    struct is *isp;
+    struct is_s *isp;
 
     if (cbi->type != HG_CB_RESPOND)
         complain(1, "reply_sent_cb:unexpected sent cb");
