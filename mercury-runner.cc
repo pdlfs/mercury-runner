@@ -205,6 +205,9 @@
 #define MR_SERVER 2        /* server */
 #define MR_CLISRV 3        /* client and server */
 
+/* id buffer size in bytes */
+#define IDBUFSZ   256
+
 struct callstate;          /* forward decl. for free list in struct is */
 struct respstate;
 
@@ -275,8 +278,8 @@ struct is_s {
     hg_context_t *hgctx;     /* context for this instance */
     hg_id_t myrpcid;         /* the ID of the instance's RPC */
     pthread_t nthread;       /* network thread */
-    char myid[256];          /* my local merc address */
-    char remoteid[256];      /* remote merc address */
+    char myid[IDBUFSZ];      /* my local merc address */
+    char remoteid[IDBUFSZ];  /* remote merc address */
     hg_addr_t remoteaddr;    /* encoded remote address */
     char myfun[64];          /* my function name */
     int nprogress;           /* number of times through progress loop */
@@ -1706,7 +1709,7 @@ void save_dir_addr(int n) {
  * load_dir_addr: load remote address from a directory, return malloc'd buf
  */
 char *load_dir_addr(int n) {
-    char file[128], *retbuf;
+    char file[IDBUFSZ*2], *retbuf;
     struct stat st;
     FILE *fp;
     snprintf(file, sizeof(file), "s.%s.%d", is[n].remoteid, n);
@@ -1731,7 +1734,7 @@ char *load_dir_addr(int n) {
  */
 static void clean_dir_addrs() {
     int lcv;
-    char file[128];
+    char file[IDBUFSZ*2];
     if (!is || g.dir == NULL)
         return;
     for (lcv = 0 ; lcv < g.ninst ; lcv++) {
