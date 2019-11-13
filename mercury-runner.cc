@@ -289,7 +289,7 @@ struct is_s {
     struct respstate *rfree; /* server: free resp state structures */
     int nrfree;              /* length of rfree list */
 
-    /* client side sending flow control */
+    /* client side locking and sending flow control */
     pthread_mutex_t slock;   /* lock for this block of vars */
     pthread_cond_t scond;    /* client blocks here if waiting for network */
     int scond_mode;          /* mode for scond */
@@ -2045,22 +2045,22 @@ static hg_return_t forw_cb(const struct hg_cb_info *cbi) {
         }
     }
 
-    /* either put cs in cache for reuse or free it */
-    if (g.xcallcachemax < 0 ||
-        (g.xcallcachemax != 0 && isp->ncfree >= g.xcallcachemax)) {
-
-        free_callstate(cs);    /* get rid of it */
-
-    } else {
+    /* put cs in cache if the cache is enabled and not already full */
+    if (g.xcallcachemax >= 0 &&
+        (g.xcallcachemax == 0 || isp->ncfree < g.xcallcachemax)) {
 
         cs->next = isp->cfree; /* cache for reuse */
         isp->cfree = cs;
         isp->ncfree++;
-
+        cs = NULL;             /* cache now owns cs */
     }
-    cs = NULL;
-
     pthread_mutex_unlock(&isp->slock);
+
+    /* free cs if it is still set (i.e. wasn't put in the cache) */
+    if (cs) {
+        free_callstate(cs);
+        cs = NULL;
+    }
 
     return(HG_SUCCESS);
 }
