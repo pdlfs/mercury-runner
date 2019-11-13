@@ -1758,6 +1758,7 @@ void *run_instance(void *arg) {
     struct useprobe rp;
     struct callstate *cs;
     unsigned char data;
+    struct respstate *rs;
 
     print2("%d: instance running\n", n);
     is[n].n = n;    /* make it easy to map 'is' structure back to n */
@@ -1947,6 +1948,13 @@ skipsend:
     }
     is[n].ncfree = 0;     /* just to be clear */
 
+    /* dump the respstate cache */
+    while ((rs = is[n].rfree) != NULL) {
+        is[n].rfree = rs->next;
+        free_respstate(rs);
+    }
+    is[n].nrfree = 0;     /* just to be clear */
+
     print2("%d: destroy context and finalize mercury\n", n);
     HG_Context_destroy(is[n].hgctx);
     HG_Finalize(is[n].hgclass);
@@ -2106,13 +2114,6 @@ static void *run_network(void *arg) {
         }
 
     }
-
-    /* dump the respstate cache */
-    while ((rs = is[n].rfree) != NULL) {
-        is[n].rfree = rs->next;
-        free_respstate(rs);
-    }
-    is[n].nrfree = 0;     /* just to be clear */
 
 #ifdef RUSAGE_THREAD
     useprobe_end(&rn);
