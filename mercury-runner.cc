@@ -1800,7 +1800,10 @@ void *run_instance(void *arg) {
                          &is[n], NULL) != HG_SUCCESS)
         complain(1, "unable to register n as data");
 
-    /* fork off network progress/trigger thread */
+    /* init locking and fork off network progress/trigger thread */
+    if (pthread_mutex_init(&is[n].slock, NULL) != 0)
+        complain(1, "slock mutex init");
+    if (pthread_cond_init(&is[n].scond, NULL) != 0) complain(1, "scond init");
     is[n].sends_done = 0;   /* run_network reads this */
     rv = pthread_create(&is[n].nthread, NULL, run_network, (void*)&n);
     if (rv != 0) complain(1, "pthread create srvr failed %d", rv);
@@ -1873,11 +1876,8 @@ void *run_instance(void *arg) {
     }
 
     print2("%d: sending...\n", n);
-    if (pthread_mutex_init(&is[n].slock, NULL) != 0)
-        complain(1, "slock mutex init");
     is[n].nsent = 0;
     is[n].scond_mode = SM_OFF;
-    if (pthread_cond_init(&is[n].scond, NULL) != 0) complain(1, "scond init");
     /* starting lcv at 1, indicates number we are sending */
     for (lcv = 1 ; lcv <= g.count ; lcv++) {
 
@@ -1923,9 +1923,7 @@ void *run_instance(void *arg) {
         if (pthread_cond_wait(&is[n].scond, &is[n].slock) != 0)
             complain(1, "snd cond wait");
     }
-    pthread_cond_destroy(&is[n].scond);
     pthread_mutex_unlock(&is[n].slock);
-    pthread_mutex_destroy(&is[n].slock);
     is[n].sends_done = 1;
     print2("%d: all sends complete\n", n);
 
@@ -1936,6 +1934,9 @@ skipsend:
         HG_Addr_free(is[n].hgclass, is[n].remoteaddr);
         is[n].remoteaddr = NULL;
     }
+    /* done with locking, we are the only thread left in this instance */
+    pthread_cond_destroy(&is[n].scond);
+    pthread_mutex_destroy(&is[n].slock);
     useprobe_end(&rp);
     print2("%d: all recvs complete\n", n);
 
