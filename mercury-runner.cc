@@ -1806,6 +1806,8 @@ void *run_instance(void *arg) {
         complain(1, "slock mutex init");
     if (pthread_cond_init(&is[n].scond, NULL) != 0) complain(1, "scond init");
     is[n].sends_done = 0;   /* run_network reads this */
+    is[n].recvd = is[n].responded = 0;
+    is[n].nprogress = is[n].ntrigger = 0;
     rv = pthread_create(&is[n].nthread, NULL, run_network, (void*)&n);
     if (rv != 0) complain(1, "pthread create srvr failed %d", rv);
 
@@ -2089,9 +2091,7 @@ static void *run_network(void *arg) {
 #endif
     unsigned int actual;
     hg_return_t ret;
-    struct respstate *rs;
-    is[n].recvd = is[n].responded = actual = 0;
-    is[n].nprogress = is[n].ntrigger = 0;
+    actual = 0;
 
     print2("%d: network thread running\n", n);
 #ifdef RUSAGE_THREAD
