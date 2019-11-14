@@ -288,6 +288,7 @@ struct is_s {
     int responded;           /* server: completed responses */
     struct respstate *rfree; /* server: free resp state structures */
     int nrfree;              /* length of rfree list */
+    int stop_progthread;     /* set to stop the progress thread */
 
     /* client side locking and sending flow control */
     pthread_mutex_t slock;   /* lock for this block of vars */
@@ -300,6 +301,7 @@ struct is_s {
 #define SM_SENTALL  2        /* finished sending all RPCs */
     struct callstate *cfree; /* free call state structures */
     int ncfree;              /* length of cfree list */
+    int recvs_done;          /* server sets to let client know it is done */
 
     /* no mutex since only the main thread can write it */
     int sends_done;          /* set to non-zero when nsent is done */
@@ -1808,6 +1810,9 @@ void *run_instance(void *arg) {
     is[n].sends_done = 0;   /* run_network reads this */
     is[n].recvd = is[n].responded = 0;
     is[n].nprogress = is[n].ntrigger = 0;
+    is[n].stop_progthread = 0;
+    /* client-only mode: nothing to recv, so mark recvs_done now */
+    is[n].recvs_done = (g.mode == MR_CLIENT) ? 1 : 0;
     rv = pthread_create(&is[n].nthread, NULL, run_network, (void*)&n);
     if (rv != 0) complain(1, "pthread create srvr failed %d", rv);
 
@@ -1932,6 +1937,14 @@ void *run_instance(void *arg) {
 
 skipsend:
     /* done sending, wait for network thread to finish and exit */
+    pthread_mutex_lock(&is[n].slock);
+    while (is[n].recvs_done == 0) {
+        if (pthread_cond_wait(&is[n].scond, &is[n].slock) != 0)
+            complain(1, "recvs_done cond wait");
+    }
+    pthread_mutex_unlock(&is[n].slock);
+
+    is[n].stop_progthread = 1;
     pthread_join(is[n].nthread, NULL);
     if (is[n].remoteaddr) {
         HG_Addr_free(is[n].hgclass, is[n].remoteaddr);
@@ -2098,17 +2111,16 @@ static void *run_network(void *arg) {
     useprobe_start(&rn, RUSAGE_THREAD);
 #endif
 
-    /* while (not done sending or not done recving */
-    while ( ((g.mode & MR_CLIENT) && !is[n].sends_done  ) ||
-            ((g.mode & MR_SERVER) && is[n].responded < g.count) ) {
+    /* run until we are asked to stop */
+    while (is[n].stop_progthread == 0) {
 
         do {
             ret = HG_Trigger(is[n].hgctx, 0, 1, &actual);
             is[n].ntrigger++;
         } while (ret == HG_SUCCESS && actual);
 
-        /* recheck, since trigger can change is[n].got */
-        if (!is[n].sends_done || is[n].responded < g.count) {
+        /* recheck, trigger may set stop_progthread */
+        if (is[n].stop_progthread == 0) {
             HG_Progress(is[n].hgctx, 100);
             is[n].nprogress++;
         }
@@ -2333,6 +2345,14 @@ static hg_return_t reply_sent_cb(const struct hg_cb_info *cbi) {
         isp->rfree = rs;
         isp->nrfree++;
 
+    }
+
+    /* did we finish? */
+    if (isp->responded >= g.count) {
+        pthread_mutex_lock(&isp->slock);
+        isp->recvs_done = 1;
+        pthread_cond_signal(&isp->scond);  /* in case client is waiting */
+        pthread_mutex_unlock(&isp->slock);
     }
 
     return(HG_SUCCESS);
