@@ -189,6 +189,10 @@
 #include <mercury.h>
 #include <mercury_macros.h>
 
+#ifdef MERCURY_PROGRESSOR
+#include <mercury-progressor/mercury-progressor.h>
+#endif
+
 #ifdef MPI_RUNNER
 #include <mpi.h>
 #endif
@@ -214,6 +218,13 @@ struct respstate;
 #ifdef MPI_RUNNER
 struct gatherstate;        /* state for gather_remote_url() */
 #endif
+
+/* useprobe: for tracking resource usage */
+struct useprobe {
+    int who;                /* flag to getrusage */
+    struct timeval t0, t1;
+    struct rusage r0, r1;
+};
 
 /*
  * g_s: shared global data (e.g. from the command line)
@@ -277,18 +288,25 @@ struct is_s {
     hg_class_t *hgclass;     /* class for this instance */
     hg_context_t *hgctx;     /* context for this instance */
     hg_id_t myrpcid;         /* the ID of the instance's RPC */
-    pthread_t nthread;       /* network thread */
     char myid[IDBUFSZ];      /* my local merc address */
     char remoteid[IDBUFSZ];  /* remote merc address */
     hg_addr_t remoteaddr;    /* encoded remote address */
     char myfun[64];          /* my function name */
+#ifdef MERCURY_PROGRESSOR
+    progressor_handle_t *ph; /* progress/trigger handler handle */
+#else
+    pthread_t nthread;       /* network thread */
+    int stop_progthread;     /* set to stop the progress thread */
     int nprogress;           /* number of times through progress loop */
     int ntrigger;            /* number of times trigger called */
+#ifdef RUSAGE_THREAD
+    struct useprobe netuse;  /* network thread usage */
+#endif
+#endif /* MERCURY_PROGRESSOR */
     int recvd;               /* server: request callback received */
     int responded;           /* server: completed responses */
     struct respstate *rfree; /* server: free resp state structures */
     int nrfree;              /* length of rfree list */
-    int stop_progthread;     /* set to stop the progress thread */
 
     /* client side locking and sending flow control */
     pthread_mutex_t slock;   /* lock for this block of vars */
@@ -378,12 +396,6 @@ void complain(int ret, const char *format, ...) {
 /*
  * start-end usage state
  */
-struct useprobe {
-    int who;                /* flag to getrusage */
-    struct timeval t0, t1;
-    struct rusage r0, r1;
-};
-
 /* load starting values into useprobe */
 static void useprobe_start(struct useprobe *up, int who) {
     up->who = who;
@@ -435,6 +447,34 @@ void useprobe_print(FILE *out, struct useprobe *up, const char *tag, int n) {
       nstr, tag, nminflt, nmajflt, ninblock, noublock, nnvcsw, nnivcsw);
     fprintf(out, "%s%s: maxrss=%ld (KiB)\n", nstr, tag, maxrss);
 }
+
+#ifdef MERCURY_PROGRESSOR
+/* print progressor stats */
+void progstats_print(FILE *out, struct progressor_stats *ps, const char *tag,
+                     int n) {
+    char nstr[32];
+
+    if (n >= 0) {
+        snprintf(nstr, sizeof(nstr), "%d: ", n);
+    } else {
+        nstr[0] = '\0';
+    }
+
+    fprintf(out, "%s%s: times: wall=%f, usr=%f, sys=%f (secs)\n", nstr, tag,
+        ps->runtime.tv_sec + (ps->runtime.tv_usec / 1000000.0),
+        ps->runusage.ru_utime.tv_sec +
+                              (ps->runusage.ru_utime.tv_usec / 1000000.0),
+        ps->runusage.ru_stime.tv_sec +
+                              (ps->runusage.ru_stime.tv_usec / 1000000.0));
+    fprintf(out,
+      "%s%s: minflt=%ld, majflt=%ld, inb=%ld, oub=%ld, vcw=%ld, ivcw=%ld\n",
+      nstr, tag, ps->runusage.ru_minflt, ps->runusage.ru_majflt,
+      ps->runusage.ru_inblock, ps->runusage.ru_oublock,
+      ps->runusage.ru_nvcsw, ps->runusage.ru_nivcsw);
+    fprintf(out, "%s%s: maxrss=%ld (KiB)\n", nstr, tag,
+      ps->runusage.ru_maxrss);
+}
+#endif
 
 /*
  * getsize: a souped up version of atoi() that handles suffixes like
@@ -1063,8 +1103,20 @@ void free_respstate(struct respstate *rs) {
  */
 void sigalarm(int foo) {
     int lcv;
+    uint64_t nprog, ntrig;
     fprint2(stderr, "SIGALRM detected\n");
     for (lcv = 0 ; lcv < g.ninst ; lcv++) {
+#ifdef MERCURY_PROGRESSOR
+    if (is[lcv].ph) {
+        nprog = mercury_progressor_nprogress(is[lcv].ph);
+        ntrig = mercury_progressor_ntrigger(is[lcv].ph);
+    } else {
+        nprog = ntrig = 0;
+    }
+#else
+    nprog = is[lcv].nprogress;
+    ntrig = is[lcv].ntrigger;
+#endif
         fprint2(stderr, "%d: @alarm: ", lcv);
         if (is[lcv].hgctx == NULL) {
             fprint2(stderr, "no context\n");
@@ -1074,7 +1126,7 @@ void sigalarm(int foo) {
                 "srvr=%d(%d), clnt=%d(%d), sdone=%d, prog=%d, trig=%d\n",
                 is[lcv].recvd, is[lcv].recvd - is[lcv].responded,
                 is[lcv].nstarted, is[lcv].nstarted - is[lcv].nsent,
-                is[lcv].sends_done, is[lcv].nprogress, is[lcv].ntrigger);
+                is[lcv].sends_done, nprog, ntrig);
     }
     clean_dir_addrs();
     fprint2(stderr, "Alarm clock\n");
@@ -1092,7 +1144,9 @@ void sigalarm(int foo) {
  * forward prototype decls.
  */
 static void *run_instance(void *arg);   /* run one instance */
+#if !defined(MERCURY_PROGRESSOR)
 static void *run_network(void *arg);    /* per-instance network thread */
+#endif
 static hg_return_t lookup_cb(const struct hg_cb_info *cbi);  /* client cb */
 static hg_return_t forw_cb(const struct hg_cb_info *cbi);  /* client cb */
 static hg_return_t rpchandler(hg_handle_t handle); /* server cb */
@@ -1761,6 +1815,9 @@ void *run_instance(void *arg) {
     struct callstate *cs;
     unsigned char data;
     struct respstate *rs;
+#ifdef MERCURY_PROGRESSOR
+    struct progressor_stats ps;
+#endif
 
     print2("%d: instance running\n", n);
     is[n].n = n;    /* make it easy to map 'is' structure back to n */
@@ -1807,14 +1864,22 @@ void *run_instance(void *arg) {
     if (pthread_mutex_init(&is[n].slock, NULL) != 0)
         complain(1, "slock mutex init");
     if (pthread_cond_init(&is[n].scond, NULL) != 0) complain(1, "scond init");
-    is[n].sends_done = 0;   /* run_network reads this */
+    is[n].sends_done = 0;
     is[n].recvd = is[n].responded = 0;
-    is[n].nprogress = is[n].ntrigger = 0;
-    is[n].stop_progthread = 0;
     /* client-only mode: nothing to recv, so mark recvs_done now */
     is[n].recvs_done = (g.mode == MR_CLIENT) ? 1 : 0;
+#ifdef MERCURY_PROGRESSOR
+    is[n].ph = mercury_progressor_init(is[n].hgclass, is[n].hgctx);
+    if (is[n].ph == NULL) complain(1, "mercury_progressor_init failed");
+    if (mercury_progressor_needed(is[n].ph) != HG_SUCCESS)
+        complain(1, "mercury_progressor_needed failed");
+    print2("%d: network thread running\n", n);
+#else
+    is[n].stop_progthread = 0;
+    is[n].nprogress = is[n].ntrigger = 0;
     rv = pthread_create(&is[n].nthread, NULL, run_network, (void*)&n);
     if (rv != 0) complain(1, "pthread create srvr failed %d", rv);
+#endif /* MERCURY_PROGRESSOR */
 
     /* MPI gather the remoteurl, if requested */
     if (g.mpixgather) {
@@ -1944,8 +2009,26 @@ skipsend:
     }
     pthread_mutex_unlock(&is[n].slock);
 
+#ifdef MERCURY_PROGRESSOR
+    if (mercury_progressor_getstats(is[n].ph, &ps) != HG_SUCCESS)
+        complain(1, "mercury_progressor_getstats failed");
+    if (mercury_progressor_idle(is[n].ph) != HG_SUCCESS)
+        complain(1, "mercury_progressor_idle failed");
+    print2("%d: network thread complete (nprogress=%d, ntrigger=%d)\n", n,
+           mercury_progressor_nprogress(is[n].ph),
+           mercury_progressor_ntrigger(is[n].ph));
+    progstats_print(stdout, &ps, "net", n);
+    if (g.savefp) progstats_print(g.savefp,  &ps, "net", n);
+    if (mercury_progressor_freehandle(is[n].ph) != HG_SUCCESS)
+        complain(1, "mercury_progressor_freehandle failed");
+#else
     is[n].stop_progthread = 1;
     pthread_join(is[n].nthread, NULL);
+#ifdef RUSAGE_THREAD
+    useprobe_print(stdout, &is[n].netuse, "net", n);
+    if (g.savefp) useprobe_print(g.savefp, &is[n].netuse, "net", n);
+#endif
+#endif
     if (is[n].remoteaddr) {
         HG_Addr_free(is[n].hgclass, is[n].remoteaddr);
         is[n].remoteaddr = NULL;
@@ -2089,6 +2172,7 @@ static hg_return_t forw_cb(const struct hg_cb_info *cbi) {
     return(HG_SUCCESS);
 }
 
+#if !defined(MERCURY_PROGRESSOR)
 /*
  * run_network: network support pthread.   need to call progress to push the
  * network and then trigger to run the callback.  we do this all in
@@ -2099,16 +2183,13 @@ static hg_return_t forw_cb(const struct hg_cb_info *cbi) {
  */
 static void *run_network(void *arg) {
     int n = *((int *)arg);
-#ifdef RUSAGE_THREAD
-    struct useprobe rn;
-#endif
     unsigned int actual;
     hg_return_t ret;
     actual = 0;
 
     print2("%d: network thread running\n", n);
 #ifdef RUSAGE_THREAD
-    useprobe_start(&rn, RUSAGE_THREAD);
+    useprobe_start(&is[n].netuse, RUSAGE_THREAD);
 #endif
 
     /* run until we are asked to stop */
@@ -2128,16 +2209,13 @@ static void *run_network(void *arg) {
     }
 
 #ifdef RUSAGE_THREAD
-    useprobe_end(&rn);
+    useprobe_end(&is[n].netuse);
 #endif
     print2("%d: network thread complete (nprogress=%d, ntrigger=%d)\n", n,
            is[n].nprogress, is[n].ntrigger);
-#ifdef RUSAGE_THREAD
-    useprobe_print(stdout, &rn, "net", n);
-    if (g.savefp) useprobe_print(g.savefp, &rn, "net", n);
-#endif
     return(NULL);
 }
+#endif /* !defined(MERCURY_PROGRESSOR) */
 
 /*
  * server side funcions....

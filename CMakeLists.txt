@@ -21,8 +21,10 @@ if (NOT CMAKE_BUILD_TYPE)
                   "Debug" "Release" "RelWithDebInfo" "MinSizeRel")
 endif ()
 set (MPI "OFF" CACHE BOOL "Enable MPI-related flags")
+set (PROGRESSOR "OFF" CACHE BOOL "Use mercury-progressor for progess loop")
 
 message (STATUS "MPI Support: ${MPI}")
+message (STATUS "mercury-progressor: ${PROGRESSOR}")
 
 set (CMAKE_THREAD_PREFER_PTHREAD TRUE)
 set (THREADS_PREFER_PTHREAD_FLAG TRUE)
@@ -33,6 +35,9 @@ find_package (Threads REQUIRED)
 find_package (mercury CONFIG REQUIRED)
 if (MPI)
     find_package (MPI MODULE REQUIRED)
+endif ()
+if (PROGRESSOR)
+    find_package (mercury-progressor CONFIG REQUIRED)
 endif ()
 
 add_executable (mercury-runner mercury-runner.cc)
@@ -68,6 +73,14 @@ if (MPI)
   set_property (TARGET mercury-runner APPEND PROPERTY LINK_FLAGS
                 ${MPI_CXX_LINK_FLAGS})
   get_property (link_flags TARGET mercury-runner PROPERTY LINK_FLAGS)
+endif ()
+
+#
+# PROGRESSOR handling
+#
+if (PROGRESSOR)
+  target_compile_options (mercury-runner PRIVATE -DMERCURY_PROGRESSOR)
+  target_link_libraries (mercury-runner mercury-progressor)
 endif ()
 
 #
