@@ -187,6 +187,7 @@
 #include <sys/types.h>
 
 #include <mercury.h>
+#include <mercury_log.h>
 #include <mercury_macros.h>
 
 #ifdef MERCURY_PROGRESSOR
