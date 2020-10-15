@@ -2021,6 +2021,8 @@ skipsend:
             complain(1, "recvs_done cond wait");
     }
     pthread_mutex_unlock(&is[n].slock);
+    useprobe_end(&rp);
+    print2("%d: all recvs complete\n", n);
 
 #ifdef MERCURY_PROGRESSOR
     if (mercury_progressor_getstats(is[n].ph, &ps) != HG_SUCCESS)
@@ -2049,8 +2051,6 @@ skipsend:
     /* done with locking, we are the only thread left in this instance */
     pthread_cond_destroy(&is[n].scond);
     pthread_mutex_destroy(&is[n].slock);
-    useprobe_end(&rp);
-    print2("%d: all recvs complete\n", n);
 
     /* dump the callstate cache */
     while ((cs = is[n].cfree) != NULL) {
