@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017, Carnegie Mellon University.
+ * Copyright (c) 2017-2020, Carnegie Mellon University.
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -74,7 +74,8 @@
  *  -q           quiet mode - don't print during RPCs
  *  -r n         enable tag suffix with this run number
  *  -s file      save copy of our output in this file
- *  -t secs      timeout (alarm)
+ *  -T msec      network progress timeout (HG_Progress)
+ *  -t secs      timeout (watchdog alarm)
  *
  * size related options:
  * -i size     input req size (>= 8 if specified)
@@ -202,19 +203,20 @@
 /*
  * default values for port and count
  */
-#define DEF_BASEPORT 19900 /* starting TCP port we listen on (instance 0) */
-#define DEF_COUNT 5        /* default # of msgs to send and recv in a run */
-#define DEF_TIMEOUT 120    /* alarm timeout */
+#define DEF_BASEPORT 19900  /* starting TCP port we listen on (instance 0) */
+#define DEF_COUNT 5         /* default # of msgs to send and recv in a run */
+#define DEF_PROGTIMEOUT 100 /* network progress timeout msec (HG_Progress) */
+#define DEF_TIMEOUT 120     /* watchdog alarm timeout sec */
 
 /* operation modes - can be used as a bitmask or a value */
-#define MR_CLIENT 1        /* client */
-#define MR_SERVER 2        /* server */
-#define MR_CLISRV 3        /* client and server */
+#define MR_CLIENT 1         /* client */
+#define MR_SERVER 2         /* server */
+#define MR_CLISRV 3         /* client and server */
 
 /* id buffer size in bytes */
 #define IDBUFSZ   256
 
-struct callstate;          /* forward decl. for free list in struct is */
+struct callstate;           /* forward decl. for free list in struct is */
 struct respstate;
 
 #ifdef MPI_RUNNER
@@ -255,7 +257,8 @@ struct g_s {
     int rflag;               /* -r tag suffix spec'd */
     int rflagval;            /* value for -r */
     FILE *savefp;            /* save copy of outputhere */
-    int timeout;             /* alarm timeout */
+    int progtimeout;         /* network progress timeout (HG_Progress) */
+    int timeout;             /* watchdog alarm timeout */
     char tagsuffix[64];      /* tag suffix: ninst-count-mode-limit-run# */
 
     /*
@@ -1191,7 +1194,8 @@ static void usage(const char *msg) {
     fprintf(stderr, "\t-q          quiet mode\n");
     fprintf(stderr, "\t-r n        enable tag suffix with this run number\n");
     fprintf(stderr, "\t-s file     save copy of our output in this file\n");
-    fprintf(stderr, "\t-t sec      timeout (alarm), in seconds\n");
+    fprintf(stderr, "\t-T msec     network progress timeout, in mseconds\n");
+    fprintf(stderr, "\t-t sec      timeout (watchdog alarm), in seconds\n");
     fprintf(stderr, "\nuse '-l 1' to serialize RPCs\n\n");
     fprintf(stderr, "size related options:\n");
     fprintf(stderr, "\t-i size     input req size (>= 8 if specified)\n");
@@ -1267,10 +1271,11 @@ int main(int argc, char **argv) {
     g.count = DEF_COUNT;
     g.mode = MR_CLISRV;
     g.baseport = DEF_BASEPORT;
+    g.progtimeout = DEF_PROGTIMEOUT;
     g.timeout = DEF_TIMEOUT;
 
     while ((ch = getopt(argc, argv,
-                        "c:D:d:gi:l:Mm:o:Pp:qr:t:L:OR:S:s:X:Y:")) != -1) {
+                        "c:D:d:gi:l:Mm:o:Pp:qr:T:t:L:OR:S:s:X:Y:")) != -1) {
         switch (ch) {
             case 'c':
                 g.count = atoi(optarg);
@@ -1336,6 +1341,10 @@ int main(int argc, char **argv) {
             case 'r':
                 g.rflag++;  /* will gen tag suffix after args parsed */
                 g.rflagval = atoi(optarg);
+                break;
+            case 'T':
+                g.progtimeout = atoi(optarg);
+                if (g.progtimeout < 0) usage("bad progress timeout");
                 break;
             case 't':
                 g.timeout = atoi(optarg);
@@ -1530,6 +1539,7 @@ int main(int argc, char **argv) {
         print2("\tsuffix     = %s\n", g.tagsuffix);
     if (savefile)
         print2("\tsavefile   = %s\n", savefile);
+    print2("\tprogtime   = %d\n", g.progtimeout);
     print2("\ttimeout    = %d\n", g.timeout);
     print2("sizes:\n");
     print2("\tinput      = %d\n", (g.inreqsz == 0) ? 4 : g.inreqsz);
@@ -1872,6 +1882,7 @@ void *run_instance(void *arg) {
     is[n].recvs_done = (g.mode == MR_CLIENT) ? 1 : 0;
 #ifdef MERCURY_PROGRESSOR
     is[n].ph = mercury_progressor_init(is[n].hgclass, is[n].hgctx);
+    mercury_progressor_set_progtimeout(is[n].ph, g.progtimeout);
     if (is[n].ph == NULL) complain(1, "mercury_progressor_init failed");
     if (mercury_progressor_needed(is[n].ph) != HG_SUCCESS)
         complain(1, "mercury_progressor_needed failed");
@@ -2204,7 +2215,7 @@ static void *run_network(void *arg) {
 
         /* recheck, trigger may set stop_progthread */
         if (is[n].stop_progthread == 0) {
-            HG_Progress(is[n].hgctx, 100);
+            HG_Progress(is[n].hgctx, g.progtimeout);
             is[n].nprogress++;
         }
 
