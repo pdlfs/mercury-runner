@@ -189,7 +189,6 @@
 
 #include <mercury.h>
 #include <mercury_bulk.h>
-#include <mercury_log.h>
 #include <mercury_macros.h>
 
 #ifdef MERCURY_PROGRESSOR
@@ -707,9 +706,9 @@ MERCURY_GEN_PROC(rpcout_t, ((int32_t)(ret)))
  */
 
 /* helper macro to reduce the verbage ... */
-#define procheck(R,MSG) if ((R) != HG_SUCCESS) { \
-    hg_log_write(HG_LOG_TYPE_ERROR, "HG", __FILE__, __LINE__, __func__, MSG); \
-    return(R); \
+#define procheck(R,MSG) if ((R) != HG_SUCCESS) {               \
+    complain(0, "procheck: %s (line %d)", MSG, __LINE__);      \
+    return(R);                                                 \
 }
 
 #define RPC_EXTENDED 0x80000000      /* set in seq/ret if extended format */
@@ -779,8 +778,7 @@ static hg_return_t hg_proc_rpcin_t(hg_proc_t proc, void *data) {
         case HG_DECODE:
             struct_data->xbuf = (char *)malloc(xlen);
             if (struct_data->xbuf == NULL) {
-                hg_log_write(HG_LOG_TYPE_ERROR, "HG", __FILE__, __LINE__,
-                             __func__, "Proc xbuf malloc");
+                complain(0, "hg_proc_rpcin_t: Proc xbuf malloc fail");
                 return(HG_NOMEM_ERROR);
             }
             /*FALLTHROUGH*/
@@ -840,8 +838,7 @@ static hg_return_t hg_proc_rpcout_t(hg_proc_t proc, void *data) {
     case HG_DECODE:
         struct_data->obuf = (char *)malloc(struct_data->olen);
         if (struct_data->obuf == NULL) {
-            hg_log_write(HG_LOG_TYPE_ERROR, "HG", __FILE__, __LINE__,
-                         __func__, "Proc obuf malloc");
+            complain(0, "hg_proc_rpcout_t: Proc obuf malloc failed");
             return(HG_NOMEM_ERROR);
         }
         /*FALLTHROUGH*/
