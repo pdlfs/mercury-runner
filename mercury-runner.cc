@@ -1268,6 +1268,9 @@ int main(int argc, char **argv) {
     g.count = DEF_COUNT;
     g.mode = MR_CLISRV;
     g.baseport = DEF_BASEPORT;
+#if (HG_VERSION_MAJOR >= 1) && defined(HG_INIT_INFO_INITIALIZER)
+    g.initinfo = HG_INIT_INFO_INITIALIZER;
+#endif
     g.progtimeout = DEF_PROGTIMEOUT;
     g.timeout = DEF_TIMEOUT;
 
